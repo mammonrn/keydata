@@ -1,0 +1,32 @@
+{
+  "name": "telegram-ads-bot",
+  "version": "1.0.0",
+  "description": "Telegram Bot สำหรับเก็บข้อมูลโฆษณาลง Google Sheets และ Google Drive",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:restart": "pm2 restart telegram-ads-bot",
+    "pm2:logs": "pm2 logs telegram-ads-bot",
+    "pm2:stop": "pm2 stop telegram-ads-bot"
+  },
+  "keywords": ["telegram", "bot", "google-sheets", "google-drive"],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "googleapis": "^140.0.1",
+    "grammy": "^1.26.0",
+    "winston": "^3.13.0",
+    "winston-daily-rotate-file": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
