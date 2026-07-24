@@ -47,8 +47,9 @@ function saveJsonList(filePath: string, list: number[]): void {
 
 export const REQUIRED_ENV_VARS = [
   "TELEGRAM_BOT_TOKEN",
-  "GOOGLE_SERVICE_ACCOUNT_EMAIL",
-  "GOOGLE_PRIVATE_KEY",
+  "GOOGLE_OAUTH_CLIENT_ID",
+  "GOOGLE_OAUTH_CLIENT_SECRET",
+  "GOOGLE_OAUTH_REFRESH_TOKEN",
   "GOOGLE_DRIVE_ROOT_FOLDER_ID",
   "SUPER_ADMIN_ID",
 ] as const;
@@ -65,8 +66,9 @@ export function validateEnv(): void {
 
 export const config = {
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
-  googleServiceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? "",
-  googlePrivateKey: (process.env.GOOGLE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n"),
+  googleOauthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID ?? "",
+  googleOauthClientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? "",
+  googleOauthRefreshToken: process.env.GOOGLE_OAUTH_REFRESH_TOKEN ?? "",
   googleDriveRootFolderId: process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID ?? "",
   superAdminId: Number(process.env.SUPER_ADMIN_ID ?? 0),
   logLevel: process.env.LOG_LEVEL ?? "info",

@@ -26,30 +26,43 @@ async function findSpreadsheet(monthFolderId: string, fileName: string): Promise
 }
 
 async function createSpreadsheet(monthFolderId: string, fileName: string): Promise<string> {
-  const sheets = getSheetsClient();
   const drive = getDriveClient();
+  const sheets = getSheetsClient();
 
+  // Create directly inside the target folder via the Drive API.
+  // (Using sheets.spreadsheets.create() first creates the file in the
+  // service account's own Drive space, which has zero storage quota
+  // and fails with a permission error. Creating directly with `parents`
+  // set uses the shared folder's quota instead.)
   const created = await withRetry(() =>
-    sheets.spreadsheets.create({
+    drive.files.create({
       requestBody: {
-        properties: { title: fileName },
-        sheets: [{ properties: { title: SHEET_TAB_NAME } }],
+        name: fileName,
+        mimeType: "application/vnd.google-apps.spreadsheet",
+        parents: [monthFolderId],
       },
+      fields: "id",
     })
   );
   await throttle();
 
-  const spreadsheetId = created.data.spreadsheetId;
+  const spreadsheetId = created.data.id;
   if (!spreadsheetId) throw new Error(`Failed to create spreadsheet: ${fileName}`);
 
-  const file = await withRetry(() => drive.files.get({ fileId: spreadsheetId, fields: "parents" }));
-  const previousParents = (file.data.parents ?? []).join(",");
+  // Rename the default "Sheet1" tab to our desired tab name.
   await withRetry(() =>
-    drive.files.update({
-      fileId: spreadsheetId,
-      addParents: monthFolderId,
-      removeParents: previousParents,
-      fields: "id, parents",
+    sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateSheetProperties: {
+              properties: { sheetId: 0, title: SHEET_TAB_NAME },
+              fields: "title",
+            },
+          },
+        ],
+      },
     })
   );
   await throttle();
