@@ -193,7 +193,7 @@ function adsDataToRow(rowNumber: number, data: AdsData): string[] {
     data.totalClick !== undefined && data.totalClick !== null ? String(data.totalClick) : "",
     String(data.cpr),
     String(data.totalSpent),
-    String(data.impressions),
+    data.impressions !== undefined && data.impressions !== null ? String(data.impressions) : "",
     String(data.reach),
     data.targetAudience ?? "",
     data.adsName ?? "",

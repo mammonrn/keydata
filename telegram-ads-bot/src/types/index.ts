@@ -4,7 +4,7 @@ export interface AdsData {
   totalClick?: number;
   cpr: number;
   totalSpent: number;
-  impressions: number;
+  impressions?: number;
   reach: number;
   targetAudience?: string;
   adsName?: string;
@@ -20,7 +20,6 @@ export const REQUIRED_FIELDS = [
   "date",
   "cpr",
   "totalSpent",
-  "impressions",
   "reach",
   "website",
   "platform",

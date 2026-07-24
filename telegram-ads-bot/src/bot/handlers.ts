@@ -20,7 +20,7 @@ function missingFieldsOf(data: Partial<AdsData>): string[] {
   if (isEmptyNumber(data.totalMessage) && isEmptyNumber(data.totalClick)) {
     missing.push(TOTAL_MESSAGE_OR_CLICK_FIELD);
   }
-  for (const f of ["cpr", "totalSpent", "impressions", "reach", "website", "platform"] as const) {
+  for (const f of ["cpr", "totalSpent", "reach", "website", "platform"] as const) {
     const value = (data as any)[f];
     if (value === undefined || value === null || value === "") missing.push(f);
   }
@@ -191,7 +191,9 @@ async function handleAwaitingFieldValue(ctx: Context, userId: number, text: stri
       await ctx.reply(`❗ ${missingFieldLabel(field)} เป็นข้อมูลที่จำเป็น กรุณาระบุค่า:`);
       return;
     }
-    (data as any)[field] = "";
+    // undefined (not "" or 0) so numeric optionals stay typed correctly and
+    // land in the sheet as a blank cell.
+    (data as any)[field] = undefined;
   } else {
     (data as any)[field] = result.value;
   }
