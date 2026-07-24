@@ -76,6 +76,7 @@ export interface UserSession {
   missingFields?: string[];
   currentMissingField?: string;
   pendingPhotoFileIds?: string[];
+  pendingPhotosAt?: number;
   pendingMediaGroupId?: string;
   confirmationMessageId?: number;
   pendingEdit?: PendingEdit;

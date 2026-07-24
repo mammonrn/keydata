@@ -94,6 +94,38 @@ export function parseStrictNumericAnswer(raw: string): number | null {
   return null;
 }
 
+const DATE_DMY = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/;
+const DATE_YMD = /^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})$/;
+
+/**
+ * Accepts a date written with /, . or - separators (23/7/2026, 23.7.2026,
+ * 23-7-2026, 2026-7-23) and normalizes it to DD/MM/YYYY. Returns null for
+ * anything that is not a recognizable date, which doubles as validation for
+ * date answers in the Q&A flow.
+ */
+export function normalizeDateString(raw: string): string | null {
+  const trimmed = raw.trim();
+  let day: number;
+  let month: number;
+  let year: number;
+
+  const dmy = trimmed.match(DATE_DMY);
+  if (dmy) {
+    day = Number(dmy[1]);
+    month = Number(dmy[2]);
+    year = Number(dmy[3]);
+  } else {
+    const ymd = trimmed.match(DATE_YMD);
+    if (!ymd) return null;
+    year = Number(ymd[1]);
+    month = Number(ymd[2]);
+    day = Number(ymd[3]);
+  }
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`;
+}
+
 const SKIP_KEYWORDS = ["ไม่มี", "ไม่ต้องใส่", "ไม่ใส่", "none", "n/a", "na", "-"];
 
 export function isSkipAnswer(raw: string): boolean {
@@ -127,6 +159,8 @@ export function parseAdsMessage(rawText: string): ParseResult {
       if (num !== null) {
         (data as any)[field] = num;
       }
+    } else if (field === "date") {
+      data.date = normalizeDateString(valueRaw) ?? valueRaw;
     } else {
       (data as any)[field] = valueRaw;
     }
@@ -195,6 +229,14 @@ export function parseFieldAnswer(field: string, raw: string, opts?: { numeric?: 
   const trimmed = raw.trim();
   if (isSkipAnswer(trimmed)) {
     return { kind: "skip" };
+  }
+
+  if (field === "date") {
+    const normalized = normalizeDateString(trimmed);
+    if (normalized === null) {
+      return { kind: "invalid", reason: "กรุณาระบุวันที่ในรูปแบบ วัน/เดือน/ปี เช่น 23/7/2026 (ใช้ / . หรือ - คั่นได้)" };
+    }
+    return { kind: "value", value: normalized };
   }
 
   const numeric = opts?.numeric ?? NUMERIC_FIELDS.includes(field as NumericField);

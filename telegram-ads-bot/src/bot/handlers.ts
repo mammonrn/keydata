@@ -75,11 +75,24 @@ function extractPhotoFileId(ctx: Context): string | undefined {
   return photos[photos.length - 1].file_id;
 }
 
+// A photo held at idle (no data flow running yet) stays attachable for this
+// long. Covers the album case where the caption-bearing sibling message
+// arrives seconds later, without gluing week-old stray photos onto a new
+// record.
+const HELD_PHOTO_TTL_MS = 10 * 60 * 1000;
+
+function heldPhotoIds(session: UserSession): string[] {
+  const ids = session.pendingPhotoFileIds ?? [];
+  if (ids.length === 0) return [];
+  if (session.pendingPhotosAt !== undefined && Date.now() - session.pendingPhotosAt > HELD_PHOTO_TTL_MS) return [];
+  return ids;
+}
+
 async function accumulatePhoto(userId: number, fileId: string, mediaGroupId: string | undefined): Promise<number> {
   const session = getSession(userId);
   const ids = [...(session.pendingPhotoFileIds ?? [])];
   if (!ids.includes(fileId)) ids.push(fileId);
-  updateSession(userId, { pendingPhotoFileIds: ids, pendingMediaGroupId: mediaGroupId ?? session.pendingMediaGroupId });
+  updateSession(userId, { pendingPhotoFileIds: ids, pendingPhotosAt: Date.now(), pendingMediaGroupId: mediaGroupId ?? session.pendingMediaGroupId });
   return ids.length;
 }
 
@@ -89,7 +102,22 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
   const fileId = extractPhotoFileId(ctx);
   const mediaGroupId = ctx.message?.media_group_id;
 
-  if (Object.keys(parsed.data).length === 0 && !fileId) {
+  if (Object.keys(parsed.data).length === 0) {
+    // No recognizable ad fields in this message. A bare photo here is most
+    // likely an album member whose caption rides on a sibling message that
+    // may arrive after this one (Telegram delivers albums as separate
+    // messages in no guaranteed order) — hold it silently instead of
+    // starting a Q&A interrogation with no data, which would misroute the
+    // caption message into the single-field answer path when it lands.
+    if (fileId) {
+      const ids = [...heldPhotoIds(session)];
+      if (!ids.includes(fileId)) ids.push(fileId);
+      updateSession(userId, {
+        pendingPhotoFileIds: ids,
+        pendingPhotosAt: Date.now(),
+        pendingMediaGroupId: mediaGroupId ?? session.pendingMediaGroupId,
+      });
+    }
     return;
   }
 
@@ -97,9 +125,13 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
   if (!data.website && session.defaultWebsite) data.website = session.defaultWebsite;
   if (!data.platform && session.defaultPlatform) data.platform = session.defaultPlatform;
 
+  const ids = [...heldPhotoIds(session)];
+  if (fileId && !ids.includes(fileId)) ids.push(fileId);
+
   updateSession(userId, {
     pendingData: data,
-    pendingPhotoFileIds: fileId ? [fileId] : [],
+    pendingPhotoFileIds: ids,
+    pendingPhotosAt: ids.length > 0 ? Date.now() : undefined,
     pendingMediaGroupId: mediaGroupId,
   });
 
@@ -214,6 +246,26 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
       return;
     }
     // message also carries meaningful text/caption — fall through and handle it below
+  }
+
+  // A message that parses to 2+ ad fields is a full data message, not an
+  // answer to whatever single question is pending — e.g. an album's caption
+  // message landing after its photo-only sibling already started the Q&A.
+  // Swallowing it as the answer to one field would both corrupt that field
+  // and discard every other field it carries, so merge it into pendingData
+  // instead. (Single-field answers like "Total Click: 50" parse to 1 field
+  // and still flow to the strict per-question handlers below.)
+  if ((session.step === "awaiting_field_value" || session.step === "awaiting_confirmation") && text.trim()) {
+    const parsedFull = parseAdsMessage(text);
+    if (Object.keys(parsedFull.data).length >= 2) {
+      const current = getSession(userId);
+      const data: Partial<AdsData> = { ...(current.pendingData ?? {}), ...parsedFull.data };
+      if (!data.website && current.defaultWebsite) data.website = current.defaultWebsite;
+      if (!data.platform && current.defaultPlatform) data.platform = current.defaultPlatform;
+      updateSession(userId, { pendingData: data, currentMissingField: undefined });
+      await proceedAfterFieldsUpdated(ctx, userId);
+      return;
+    }
   }
 
   switch (session.step) {
