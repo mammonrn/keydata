@@ -109,13 +109,41 @@ export function registerCommands(bot: Bot): void {
         await ctx.reply(`📊 สถานะเดือน ${monthLabel}\n\nยังไม่มีข้อมูลบันทึกในเดือนนี้`);
         return;
       }
-      const total = status.reduce((sum, s) => sum + s.recordCount, 0);
-      const lines = [`📊 สถานะเดือน ${monthLabel}`, ""];
+
       for (const s of status) {
-        lines.push(`• ${s.website}: ${s.recordCount} รายการ`);
+        const lines = [
+          `📊 สถานะเว็บ ${s.website} - ${monthLabel}`,
+          "",
+          `📝 จำนวนรายการ: ${s.recordCount} รายการ`,
+          `💬 Total Message รวม: ${s.totalMessageSum}`,
+          `💰 CPR เฉลี่ย: ${s.cprAvg.toFixed(2)} บาท`,
+          `💵 Total Spent รวม: ${s.totalSpentSum.toFixed(2)} บาท`,
+          `👁 Impressions รวม: ${s.impressionsSum}`,
+          `📈 Reach รวม: ${s.reachSum}`,
+        ];
+        await ctx.reply(lines.join("\n"));
       }
-      lines.push("", `รวมทั้งหมด: ${total} รายการ`);
-      await ctx.reply(lines.join("\n"));
+
+      const totalRecords = status.reduce((sum, s) => sum + s.recordCount, 0);
+      const totalMessageSum = status.reduce((sum, s) => sum + s.totalMessageSum, 0);
+      const totalSpentSum = status.reduce((sum, s) => sum + s.totalSpentSum, 0);
+      const impressionsSum = status.reduce((sum, s) => sum + s.impressionsSum, 0);
+      const reachSum = status.reduce((sum, s) => sum + s.reachSum, 0);
+      const cprSum = status.reduce((sum, s) => sum + s.cprAvg * s.recordCount, 0);
+      const overallCprAvg = totalRecords > 0 ? cprSum / totalRecords : 0;
+
+      const summaryLines = [
+        `📊 สรุปภาพรวมทุกเว็บไซต์ - ${monthLabel}`,
+        "",
+        `🌐 จำนวนเว็บไซต์ที่มีข้อมูล: ${status.length}`,
+        `📝 จำนวนรายการรวม: ${totalRecords} รายการ`,
+        `💬 Total Message รวม: ${totalMessageSum}`,
+        `💰 CPR เฉลี่ยรวม: ${overallCprAvg.toFixed(2)} บาท`,
+        `💵 Total Spent รวม: ${totalSpentSum.toFixed(2)} บาท`,
+        `👁 Impressions รวม: ${impressionsSum}`,
+        `📈 Reach รวม: ${reachSum}`,
+      ];
+      await ctx.reply(summaryLines.join("\n"));
     } catch (err) {
       await ctx.reply(`❌ เกิดข้อผิดพลาดในการดึงสถานะ: ${(err as Error).message}`);
     }

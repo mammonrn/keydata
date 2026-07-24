@@ -126,6 +126,16 @@ export async function deleteRowWithLog(spreadsheetId: string, rowNumber: number,
 export interface MonthlyStatusEntry {
   website: string;
   recordCount: number;
+  totalMessageSum: number;
+  cprAvg: number;
+  totalSpentSum: number;
+  impressionsSum: number;
+  reachSum: number;
+}
+
+function toNumber(raw: string | undefined): number {
+  const num = Number(raw);
+  return Number.isNaN(num) ? 0 : num;
 }
 
 export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
@@ -140,7 +150,32 @@ export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
     const spreadsheetId = await findSpreadsheetIdForWebsiteMonth(folder.name, month, year, now);
     if (!spreadsheetId) continue;
     const rows = await getAllRows(spreadsheetId);
-    results.push({ website: folder.name, recordCount: rows.length });
+    const recordCount = rows.length;
+
+    let totalMessageSum = 0;
+    let cprSum = 0;
+    let totalSpentSum = 0;
+    let impressionsSum = 0;
+    let reachSum = 0;
+
+    for (const row of rows) {
+      // row.values indices: [1]=Date [2]=Platform [3]=TotalMessage [4]=CPR [5]=TotalSpent [6]=Impressions [7]=Reach
+      totalMessageSum += toNumber(row.values[3]);
+      cprSum += toNumber(row.values[4]);
+      totalSpentSum += toNumber(row.values[5]);
+      impressionsSum += toNumber(row.values[6]);
+      reachSum += toNumber(row.values[7]);
+    }
+
+    results.push({
+      website: folder.name,
+      recordCount,
+      totalMessageSum,
+      cprAvg: recordCount > 0 ? cprSum / recordCount : 0,
+      totalSpentSum,
+      impressionsSum,
+      reachSum,
+    });
   }
 
   return results;
