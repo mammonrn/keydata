@@ -54,9 +54,10 @@ async function websitePickerKeyboard(userId: number): Promise<InlineKeyboard> {
 
   // The user's /setwebsite favorite goes first as a convenience — it is
   // only ever a button, never an auto-filled value.
-  const favorite = getSession(userId).defaultWebsite;
-  if (favorite) {
-    names = [favorite, ...names.filter((n) => n !== favorite)];
+  const rawFavorite = getSession(userId).defaultWebsite;
+  if (rawFavorite) {
+    const favorite = normalizeWebsiteName(rawFavorite);
+    names = [favorite, ...names.filter((n) => n.toLowerCase() !== favorite.toLowerCase())];
   }
 
   const keyboard = new InlineKeyboard();
@@ -73,9 +74,10 @@ async function websitePickerKeyboard(userId: number): Promise<InlineKeyboard> {
 function platformPickerKeyboard(userId: number): InlineKeyboard {
   let names = listCanonicalPlatforms();
 
-  const favorite = getSession(userId).defaultPlatform;
-  if (favorite) {
-    names = [favorite, ...names.filter((n) => n !== favorite)];
+  const rawFavorite = getSession(userId).defaultPlatform;
+  if (rawFavorite) {
+    const favorite = normalizePlatformName(rawFavorite);
+    names = [favorite, ...names.filter((n) => n.toLowerCase() !== favorite.toLowerCase())];
   }
 
   const keyboard = new InlineKeyboard();
