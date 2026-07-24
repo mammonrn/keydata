@@ -2,8 +2,10 @@ import { Bot, Context, InlineKeyboard } from "grammy";
 import {
   addAllowedGroup,
   addAuthorizedUser,
+  addWebsiteAlias,
   getAllowedGroups,
   getAuthorizedUsers,
+  getWebsiteAliases,
   isAuthorizedUser,
   isSuperAdmin,
   removeAllowedGroup,
@@ -91,6 +93,7 @@ export function registerCommands(bot: Bot): void {
       "/list [website] [month] [platform] - แสดงรายการข้อมูล",
       "/setwebsite [name] - ตั้งเว็บโปรด (ปุ่มลัดแรกตอนถูกถาม + เว็บเป้าหมายของ /edit และ /delete — ไม่เติมอัตโนมัติตอนบันทึก)",
       "/setplatform [name] - ตั้งค่า platform default",
+      "/listalias - แสดง alias ของชื่อเว็บทั้งหมด",
       "/log - แสดง log ล่าสุด 10 รายการ",
     ];
     if (isAdmin) {
@@ -98,6 +101,7 @@ export function registerCommands(bot: Bot): void {
         "",
         "⛔ คำสั่ง Admin เท่านั้น:",
         "/delete [row] - ลบข้อมูล (ต้องยืนยัน 2 ครั้ง)",
+        "/addalias [canonical] [alias] - ผูกชื่อเรียกอื่นกับชื่อเว็บมาตรฐาน",
         "/adduser [id] - เพิ่ม authorized user",
         "/removeuser [id] - ลบ authorized user",
         "/addgroup [id] - เพิ่มกลุ่มที่อนุญาต",
@@ -228,6 +232,9 @@ export function registerCommands(bot: Bot): void {
         tabName: sheetInfo.tabName,
         sheetId: sheetInfo.sheetId,
         rowNumber,
+        website,
+        month: sheetInfo.month,
+        year: sheetInfo.year,
       },
     });
 
@@ -319,6 +326,9 @@ export function registerCommands(bot: Bot): void {
         tabName: sheetInfo.tabName,
         sheetId: sheetInfo.sheetId,
         rowNumber,
+        website,
+        month: sheetInfo.month,
+        year: sheetInfo.year,
       },
       deleteConfirmStage: 1,
     });
@@ -409,6 +419,36 @@ export function registerCommands(bot: Bot): void {
     if (!(await requireSuperAdmin(ctx))) return;
     logCommand(ctx.from!.id, username(ctx), "/groups");
     await ctx.reply(`👥 Allowed Groups:\n\n${getAllowedGroups().join("\n")}`);
+  });
+
+  bot.command("addalias", async (ctx) => {
+    if (!(await requireAuthorized(ctx))) return;
+    if (!(await requireSuperAdmin(ctx))) return;
+    const args = parseArgs(ctx);
+    if (args.length < 2) {
+      await ctx.reply("กรุณาระบุ canonical และ alias เช่น /addalias SH999 shwe999");
+      return;
+    }
+    const result = addWebsiteAlias(args[0], args[1]);
+    logCommand(ctx.from!.id, username(ctx), `/addalias ${args[0]} ${args[1]}`);
+    await ctx.reply(
+      result.added
+        ? `✅ เพิ่ม alias "${result.alias}" → ${result.canonical} แล้ว`
+        : `"${result.alias}" เป็น alias ของ ${result.canonical} อยู่แล้ว`
+    );
+  });
+
+  bot.command("listalias", async (ctx) => {
+    if (!(await requireAuthorized(ctx))) return;
+    logCommand(ctx.from!.id, username(ctx), "/listalias");
+    const aliases = getWebsiteAliases();
+    const entries = Object.entries(aliases);
+    if (entries.length === 0) {
+      await ctx.reply("ยังไม่มี alias ในระบบ");
+      return;
+    }
+    const lines = entries.map(([canonical, list]) => `• ${canonical}: ${list.join(", ") || "-"}`);
+    await ctx.reply(`🔗 Website Aliases:\n\n${lines.join("\n")}`);
   });
 
   bot.command("cancel", async (ctx) => {

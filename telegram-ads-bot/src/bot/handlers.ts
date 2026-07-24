@@ -1,11 +1,11 @@
 import path from "path";
 import { Bot, Context, InlineKeyboard } from "grammy";
-import { config, isAllowedGroup, isAuthorizedUser } from "../config";
+import { config, isAllowedGroup, isAuthorizedUser, normalizeWebsiteName } from "../config";
 import { AdsData, FIELD_LABELS_TH, REQUIRED_FIELDS, TOTAL_MESSAGE_OR_CLICK_FIELD, UserSession } from "../types";
 import { getSession, resetSessionFlow, updateSession } from "../services/memory";
 import { formatParsedSummary, parseAdsMessage, parseFieldAnswer, parseTotalMessageOrClickAnswer } from "./parser";
 import { EDITABLE_FIELDS } from "./fields";
-import { deleteRowWithLog, editRowField, PhotoInput, saveAdsData } from "../services/dataProcessor";
+import { deleteRowWithLog, editRowField, moveRowToWebsite, PhotoInput, saveAdsData } from "../services/dataProcessor";
 import { listKnownWebsites } from "../google/drive";
 import { logError, logUnauthorized } from "../services/logger";
 
@@ -64,6 +64,7 @@ async function websitePickerKeyboard(userId: number): Promise<InlineKeyboard> {
     keyboard.text(name, `websitepick:${name}`);
     if (idx % 2 === 1) keyboard.row();
   });
+  keyboard.row().text("➕ อื่นๆ", "websiteother");
   return keyboard;
 }
 
@@ -165,6 +166,7 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
   }
 
   const data: Partial<AdsData> = { ...parsed.data };
+  if (data.website) data.website = normalizeWebsiteName(data.website);
   // Platform may auto-fill from /setplatform, but website must never be
   // silently defaulted: groups mix records for several websites, and a
   // stale session default was mis-filing other sites' data. When absent
@@ -241,6 +243,13 @@ async function handleAwaitingFieldValue(ctx: Context, userId: number, text: stri
     // undefined (not "" or 0) so numeric optionals stay typed correctly and
     // land in the sheet as a blank cell.
     (data as any)[field] = undefined;
+  } else if (field === "website") {
+    const website = normalizeWebsiteName(String(result.value));
+    if (!website || website.length > 50) {
+      await ctx.reply("❌ ชื่อเว็บไซต์ไม่ถูกต้อง กรุณาพิมพ์ใหม่ (ไม่เกิน 50 ตัวอักษร ไม่มีอักขระพิเศษ):");
+      return;
+    }
+    data.website = website;
   } else {
     (data as any)[field] = result.value;
   }
@@ -259,6 +268,36 @@ async function handleEditingFieldValue(ctx: Context, userId: number, text: strin
   const fieldDef = EDITABLE_FIELDS.find((f) => String(f.index) === pendingEdit.field);
   if (!fieldDef) {
     resetSessionFlow(userId);
+    return;
+  }
+
+  // Website is the file the row lives in, not a cell — editing it moves the
+  // whole row (and any attached photos) to the destination website's file.
+  if (fieldDef.key === "website") {
+    const actor = { userId, username: ctx.from?.username };
+    try {
+      const newWebsite = normalizeWebsiteName(text);
+      if (!newWebsite || newWebsite.length > 50) {
+        await ctx.reply("❌ ชื่อเว็บไซต์ไม่ถูกต้อง กรุณาพิมพ์ใหม่:");
+        return;
+      }
+      if (newWebsite.toLowerCase() === pendingEdit.website.toLowerCase()) {
+        resetSessionFlow(userId);
+        await ctx.reply(`ℹ️ ข้อมูลอยู่ในเว็บ ${pendingEdit.website} อยู่แล้ว ไม่มีการเปลี่ยนแปลง`);
+        return;
+      }
+      const moved = await moveRowToWebsite(pendingEdit, newWebsite, actor);
+      resetSessionFlow(userId);
+      if (!moved) {
+        await ctx.reply(`❌ ไม่พบ row #${pendingEdit.rowNumber} ใน tab ${pendingEdit.tabName}`);
+        return;
+      }
+      const photoNote = moved.photosMoved > 0 ? ` พร้อมย้ายรูป ${moved.photosMoved} รูป` : "";
+      await ctx.reply(`✅ ย้ายข้อมูลจาก ${moved.oldWebsite} ไป ${moved.newWebsite} สำเร็จ (Row ใหม่ #${moved.newRowNumber} ใน ${moved.destFileName})${photoNote}`);
+    } catch (err) {
+      logError(userId, ctx.from?.username, String(err));
+      await ctx.reply(`❌ เกิดข้อผิดพลาดในการย้ายข้อมูล: ${(err as Error).message}`);
+    }
     return;
   }
 
@@ -309,6 +348,7 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
     if (Object.keys(parsedFull.data).length >= 2) {
       const current = getSession(userId);
       const data: Partial<AdsData> = { ...(current.pendingData ?? {}), ...parsedFull.data };
+      if (data.website) data.website = normalizeWebsiteName(data.website);
       // Website is never silently defaulted (see startAdsFlow); platform may
       // still come from /setplatform.
       if (!data.platform && current.defaultPlatform) data.platform = current.defaultPlatform;
@@ -422,7 +462,7 @@ export function registerHandlers(bot: Bot): void {
     }
 
     if (data.startsWith("websitepick:")) {
-      const website = data.slice("websitepick:".length);
+      const website = normalizeWebsiteName(data.slice("websitepick:".length));
       const session = getSession(userId);
       if (!session.pendingData) {
         resetSessionFlow(userId);
@@ -435,6 +475,20 @@ export function registerHandlers(bot: Bot): void {
       });
       await ctx.reply(`🌐 เลือกเว็บ: ${website}`);
       await proceedAfterFieldsUpdated(ctx, userId);
+      return;
+    }
+
+    if (data === "websiteother") {
+      const session = getSession(userId);
+      if (!session.pendingData) {
+        resetSessionFlow(userId);
+        await ctx.reply("ไม่มีข้อมูลที่รอการบันทึก กรุณาส่งข้อมูลใหม่");
+        return;
+      }
+      // Stay in the same waiting-for-website state; the typed answer flows
+      // through the normal single-field path (validated + normalized there).
+      updateSession(userId, { step: "awaiting_field_value", currentMissingField: "website" });
+      await ctx.reply("✏️ กรุณาพิมพ์ชื่อเว็บไซต์ใหม่ที่ต้องการเพิ่ม:");
       return;
     }
 

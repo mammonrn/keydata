@@ -63,6 +63,9 @@ export interface PendingEdit {
   tabName: string;
   sheetId: number;
   rowNumber: number;
+  website: string;
+  month: string;
+  year: string;
   field?: string;
 }
 

@@ -159,6 +159,26 @@ export async function ensureFolderStructure(
   return { websiteFolderId, yearFolderId, monthFolderId, photosFolderId: platformPhotosFolderId };
 }
 
+/**
+ * Re-parents a Drive file into a new folder. The file id (and therefore its
+ * webViewLink) is unchanged by a move, so sheet Photo Link cells stay valid.
+ */
+export async function moveFileToFolder(fileId: string, newParentId: string): Promise<void> {
+  const drive = getDriveClient();
+  const file = await withRetry(() => drive.files.get({ fileId, fields: "parents" }));
+  await throttle();
+  const previousParents = (file.data.parents ?? []).join(",");
+  await withRetry(() =>
+    drive.files.update({
+      fileId,
+      addParents: newParentId,
+      removeParents: previousParents,
+      fields: "id, parents",
+    })
+  );
+  await throttle();
+}
+
 export async function uploadPhoto(photosFolderId: string, filename: string, mimeType: string, buffer: Buffer): Promise<string> {
   const drive = getDriveClient();
   const stream = Readable.from(buffer);

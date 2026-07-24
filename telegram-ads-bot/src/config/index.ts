@@ -5,6 +5,7 @@ import path from "path";
 const DATA_DIR = path.join(__dirname, "..", "..", "data");
 const USERS_FILE = path.join(DATA_DIR, "authorized-users.json");
 const GROUPS_FILE = path.join(DATA_DIR, "allowed-groups.json");
+const ALIASES_FILE = path.join(DATA_DIR, "website-aliases.json");
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -132,6 +133,87 @@ export function removeAllowedGroup(chatId: number): boolean {
   allowedGroups = allowedGroups.filter((id) => id !== chatId);
   saveJsonList(GROUPS_FILE, allowedGroups);
   return true;
+}
+
+// ===== Website alias normalization =====
+// Staff type the same brand inconsistently (shwe666 vs SH666); without a
+// canonical mapping each spelling would get its own Drive folder and sheets.
+
+type AliasMap = Record<string, string[]>;
+
+const DEFAULT_ALIASES: AliasMap = {
+  SH666: ["shwe666", "sh666"],
+  UB89: ["ubet89", "ub89"],
+  "88F": ["88fed", "88f"],
+};
+
+function loadAliases(): AliasMap {
+  ensureDataDir();
+  if (!fs.existsSync(ALIASES_FILE)) {
+    fs.writeFileSync(ALIASES_FILE, JSON.stringify(DEFAULT_ALIASES, null, 2), "utf-8");
+    return { ...DEFAULT_ALIASES };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(ALIASES_FILE, "utf-8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const map: AliasMap = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        if (Array.isArray(value)) map[key] = value.map((v) => String(v));
+      }
+      return map;
+    }
+    return { ...DEFAULT_ALIASES };
+  } catch {
+    return { ...DEFAULT_ALIASES };
+  }
+}
+
+function saveAliases(map: AliasMap): void {
+  ensureDataDir();
+  fs.writeFileSync(ALIASES_FILE, JSON.stringify(map, null, 2), "utf-8");
+}
+
+let websiteAliases = loadAliases();
+
+// Same forbidden-character strip as drive.ts sanitizeName (duplicated here
+// because drive.ts imports this module).
+function sanitizeWebsiteInput(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, "").trim();
+}
+
+/**
+ * Maps any spelling of a website to its canonical name (case-insensitive
+ * against canonical names and their aliases). Unknown names pass through
+ * sanitized as-is — they're treated as new websites with no aliases yet.
+ */
+export function normalizeWebsiteName(input: string): string {
+  const sanitized = sanitizeWebsiteInput(input);
+  const lc = sanitized.toLowerCase();
+  if (!lc) return sanitized;
+  for (const [canonical, aliases] of Object.entries(websiteAliases)) {
+    if (canonical.toLowerCase() === lc) return canonical;
+    if (aliases.some((a) => a.toLowerCase() === lc)) return canonical;
+  }
+  return sanitized;
+}
+
+export function addWebsiteAlias(canonicalRaw: string, aliasRaw: string): { canonical: string; alias: string; added: boolean } {
+  const canonicalInput = sanitizeWebsiteInput(canonicalRaw);
+  const alias = sanitizeWebsiteInput(aliasRaw);
+  const existingKey = Object.keys(websiteAliases).find((k) => k.toLowerCase() === canonicalInput.toLowerCase());
+  const canonical = existingKey ?? canonicalInput;
+
+  if (!websiteAliases[canonical]) websiteAliases[canonical] = [];
+  if (websiteAliases[canonical].some((a) => a.toLowerCase() === alias.toLowerCase())) {
+    return { canonical, alias, added: false };
+  }
+  websiteAliases[canonical].push(alias);
+  saveAliases(websiteAliases);
+  return { canonical, alias, added: true };
+}
+
+export function getWebsiteAliases(): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(websiteAliases).map(([k, v]) => [k, [...v]]));
 }
 
 export const MONTH_NAMES_EN = [

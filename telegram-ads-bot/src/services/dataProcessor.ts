@@ -1,8 +1,10 @@
-import { AdsData } from "../types";
-import { MONTH_NAMES_EN, config } from "../config";
-import { clearDriveCaches, ensureFolderStructure, listChildFolders, uploadPhoto } from "../google/drive";
+import { AdsData, PendingEdit } from "../types";
+import { MONTH_NAMES_EN, config, normalizeWebsiteName } from "../config";
+import { clearDriveCaches, ensureFolderStructure, listChildFolders, moveFileToFolder, uploadPhoto } from "../google/drive";
 import {
+  appendRawRow,
   appendRow,
+  buildSheetFileName,
   clearSheetCaches,
   deleteRow,
   ensureSpreadsheet,
@@ -70,6 +72,9 @@ export async function saveAdsData(
 ): Promise<SaveResult> {
   const startedAt = Date.now();
   try {
+    // Defensive re-normalization: every intake path normalizes already, but
+    // this is the single choke point before folders/files get created.
+    data = { ...data, website: normalizeWebsiteName(data.website) };
     const dateObj = parseThaiDate(data.date);
     const year = String(dateObj.getFullYear());
     const month = MONTH_NAMES_EN[dateObj.getMonth()];
@@ -190,6 +195,72 @@ export async function deleteRowWithLog(
   await deleteRow(spreadsheetId, tabName, sheetId, rowNumber);
   logDeleted(actor.userId, actor.username, website, `Deleted row #${rowNumber} [${tabName}]: ${JSON.stringify(snapshot)}`, spreadsheetId, rowNumber);
   return snapshot;
+}
+
+const PHOTO_LINK_COLUMN = 12;
+
+function extractDriveFileIds(photoLinkCell: string): string[] {
+  const ids: string[] = [];
+  for (const link of photoLinkCell.split(",")) {
+    const match = link.trim().match(/\/d\/([-\w]+)/);
+    if (match) ids.push(match[1]);
+  }
+  return ids;
+}
+
+export interface MoveRowResult {
+  oldWebsite: string;
+  newWebsite: string;
+  newRowNumber: number;
+  destFileName: string;
+  photosMoved: number;
+}
+
+/**
+ * "Editing" the website of a saved row really means relocating it: each
+ * website has its own spreadsheet per month, so the row is appended to the
+ * destination website's file (created on demand) and then deleted from the
+ * source. Append-before-delete on purpose — if anything fails mid-way the
+ * worst case is a duplicate row, never a lost one. Attached photos are
+ * re-parented into the destination's Photos/{Platform}/ folder; their Drive
+ * ids (and thus the Photo Link cell) survive the move unchanged.
+ */
+export async function moveRowToWebsite(edit: PendingEdit, newWebsiteRaw: string, actor: Actor): Promise<MoveRowResult | null> {
+  const newWebsite = normalizeWebsiteName(newWebsiteRaw);
+  const oldWebsite = edit.website;
+  if (!newWebsite) return null;
+
+  const row = await getRow(edit.spreadsheetId, edit.tabName, edit.rowNumber);
+  if (!row) return null;
+
+  const rowPlatform = row[2] || edit.tabName;
+  const monthIndex = MONTH_NAMES_EN.findIndex((m) => m.toLowerCase() === edit.month.toLowerCase());
+  const monthDate = new Date(Number(edit.year), monthIndex >= 0 ? monthIndex : 0, 1);
+
+  const destRefs = await ensureFolderStructure(newWebsite, monthDate, rowPlatform, actor);
+  const destSheet = await ensureSpreadsheet(destRefs.monthFolderId, newWebsite, edit.month, edit.year, rowPlatform, actor);
+
+  const newRowNumber = await appendRawRow(destSheet, row);
+  await deleteRow(edit.spreadsheetId, edit.tabName, edit.sheetId, edit.rowNumber);
+
+  let photosMoved = 0;
+  const photoIds = extractDriveFileIds(row[PHOTO_LINK_COLUMN] ?? "");
+  for (const fileId of photoIds) {
+    await moveFileToFolder(fileId, destRefs.photosFolderId);
+    photosMoved++;
+  }
+
+  const destFileName = buildSheetFileName(newWebsite, edit.month, edit.year);
+  logEdited(
+    actor.userId,
+    actor.username,
+    newWebsite,
+    `Moved row: website "${oldWebsite}" -> "${newWebsite}" (${edit.sheetName} row #${edit.rowNumber} -> ${destFileName} [${destSheet.tabName}] row #${newRowNumber}, ${photosMoved} photo(s) moved)`,
+    destSheet.spreadsheetId,
+    newRowNumber
+  );
+
+  return { oldWebsite, newWebsite, newRowNumber, destFileName, photosMoved };
 }
 
 export interface MonthlyStatusEntry {

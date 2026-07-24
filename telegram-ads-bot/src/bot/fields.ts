@@ -8,6 +8,9 @@ export interface EditableField {
 }
 
 export const EDITABLE_FIELDS: EditableField[] = [
+  // index -1: website is not a sheet column — it identifies which file the
+  // row lives in, so editing it moves the whole row (see moveRowToWebsite).
+  { label: "เว็บไซต์ (Website)", index: -1, key: "website", numeric: false },
   { label: "Date", index: 1, key: "date", numeric: false },
   { label: "Platform", index: 2, key: "platform", numeric: false },
   { label: "Total Message", index: 3, key: "totalMessage", numeric: true },

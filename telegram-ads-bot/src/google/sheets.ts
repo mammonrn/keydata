@@ -341,6 +341,35 @@ export async function appendRow(sheet: EnsuredSheet, data: AdsData): Promise<num
   return rowNumber;
 }
 
+/**
+ * Appends an already-materialized row (as stored cell strings) to a tab,
+ * assigning the destination tab's next row number in column A. Used when
+ * moving a row between spreadsheets, where the values must be preserved
+ * verbatim rather than rebuilt from AdsData.
+ */
+export async function appendRawRow(sheet: EnsuredSheet, values: string[]): Promise<number> {
+  const sheets = getSheetsClient();
+  const existingRows = await getAllRows(sheet.spreadsheetId, sheet.tabName);
+  const rowNumber = existingRows.length + 1;
+
+  const padded = [...values];
+  while (padded.length < SHEET_HEADERS.length) padded.push("");
+  padded[0] = String(rowNumber);
+
+  await withRetry(() =>
+    sheets.spreadsheets.values.append({
+      spreadsheetId: sheet.spreadsheetId,
+      range: tabRange(sheet.tabName, "A:O"),
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: [padded.slice(0, SHEET_HEADERS.length)] },
+    })
+  );
+  await throttle();
+
+  return rowNumber;
+}
+
 export async function getAllRows(spreadsheetId: string, tabName: string): Promise<SheetRow[]> {
   const sheets = getSheetsClient();
   const res = await withRetry(() =>
