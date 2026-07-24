@@ -38,8 +38,16 @@ function missingFieldLabel(field: string): string {
   return FIELD_LABELS_TH[field] ?? field;
 }
 
-async function askForMissingField(ctx: Context, userId: number, field: string): Promise<void> {
+async function askForMissingField(ctx: Context, userId: number, field: string, opts?: { fromEditMenu?: boolean }): Promise<void> {
   updateSession(userId, { step: "awaiting_field_value", currentMissingField: field });
+  if (opts?.fromEditMenu) {
+    // Entered from the ✏️ field-select menu — offer a way back to it that
+    // doesn't discard the pending data.
+    await ctx.reply(`❓ กรุณาระบุ ${missingFieldLabel(field)}:`, {
+      reply_markup: new InlineKeyboard().text("🔙 กลับ", "backtofieldselect"),
+    });
+    return;
+  }
   await ctx.reply(`❓ กรุณาระบุ ${missingFieldLabel(field)}:`);
 }
 
@@ -336,7 +344,7 @@ function pendingEditKeyboard(): InlineKeyboard {
     keyboard.text(f.label, `pendingedit:${f.key}`);
     if (idx % 2 === 1) keyboard.row();
   });
-  keyboard.row().text("❌ ยกเลิก", "cancel");
+  keyboard.row().text("🔙 กลับ", "backtoconfirm").text("❌ ยกเลิก", "cancel");
   return keyboard;
 }
 
@@ -369,7 +377,30 @@ export function registerHandlers(bot: Bot): void {
 
     if (data.startsWith("pendingedit:")) {
       const field = data.split(":")[1];
-      await askForMissingField(ctx, userId, field);
+      await askForMissingField(ctx, userId, field, { fromEditMenu: true });
+      return;
+    }
+
+    if (data === "backtoconfirm") {
+      const session = getSession(userId);
+      if (!session.pendingData) {
+        resetSessionFlow(userId);
+        await ctx.reply("ไม่มีข้อมูลที่รอการยืนยัน");
+        return;
+      }
+      await showConfirmation(ctx, userId);
+      return;
+    }
+
+    if (data === "backtofieldselect") {
+      const session = getSession(userId);
+      if (!session.pendingData) {
+        resetSessionFlow(userId);
+        await ctx.reply("ไม่มีข้อมูลที่รอการยืนยัน");
+        return;
+      }
+      updateSession(userId, { step: "awaiting_confirmation", currentMissingField: undefined });
+      await ctx.reply("เลือก field ที่ต้องการแก้ไข:", { reply_markup: pendingEditKeyboard() });
       return;
     }
 

@@ -73,7 +73,10 @@ export const config = {
   superAdminId: Number(process.env.SUPER_ADMIN_ID ?? 0),
   logLevel: process.env.LOG_LEVEL ?? "info",
   timezone: "Asia/Bangkok",
-  googleApiRequestDelayMs: 1000,
+  // Google Sheets quota is 60 read + 60 write requests/min/user; a save is a
+  // short burst of a handful of calls, so 250ms spacing stays far inside the
+  // per-minute window. withRetry's exponential backoff handles any 429.
+  googleApiRequestDelayMs: 250,
   googleApiMaxRetries: 3,
 };
 

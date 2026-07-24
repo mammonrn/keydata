@@ -5,7 +5,20 @@ import { findMonthFolder, sanitizeName } from "./drive";
 import { logSheetCreated } from "../services/logger";
 
 const DATA_START_ROW = 2; // row 1 = header
-const LEGACY_TAB_NAME = "Data"; // pre-platform-split tab; left untouched, never read or written
+
+// Write-path lookup caches: spreadsheet ids, tab sheetIds, and header
+// verification are stable per file+tab, so re-resolving them on every save
+// costs several API round-trips (plus throttles) for nothing. Cleared on
+// save errors so externally deleted files/tabs get re-resolved.
+const spreadsheetIdCache = new Map<string, string>();
+const tabIdCache = new Map<string, number>();
+const headerVerified = new Set<string>();
+
+export function clearSheetCaches(): void {
+  spreadsheetIdCache.clear();
+  tabIdCache.clear();
+  headerVerified.clear();
+}
 
 export function buildSheetFileName(website: string, month: string, year: string): string {
   return sanitizeName(`${website}_${month}_${year}`);
@@ -40,10 +53,6 @@ export async function listSheetTabs(spreadsheetId: string): Promise<SheetTab[]> 
   return (res.data.sheets ?? [])
     .map((s) => ({ sheetId: s.properties?.sheetId ?? -1, title: s.properties?.title ?? "" }))
     .filter((s) => s.sheetId >= 0 && s.title.length > 0);
-}
-
-export function isLegacyTab(title: string): boolean {
-  return title === LEGACY_TAB_NAME;
 }
 
 export async function findTab(spreadsheetId: string, tabName: string): Promise<SheetTab | null> {
@@ -164,9 +173,17 @@ async function migrateTabHeaderIfNeeded(spreadsheetId: string, sheetId: number, 
  * (never a hardcoded 0) for all id-addressed operations.
  */
 export async function ensureSheetTab(spreadsheetId: string, tabName: string): Promise<SheetTab> {
+  const cacheKey = `${spreadsheetId}|${tabName}`;
+  const cachedSheetId = tabIdCache.get(cacheKey);
+  if (cachedSheetId !== undefined && headerVerified.has(cacheKey)) {
+    return { sheetId: cachedSheetId, title: tabName };
+  }
+
   const existing = await findTab(spreadsheetId, tabName);
   if (existing) {
     await migrateTabHeaderIfNeeded(spreadsheetId, existing.sheetId, existing.title);
+    tabIdCache.set(cacheKey, existing.sheetId);
+    headerVerified.add(cacheKey);
     return existing;
   }
 
@@ -185,6 +202,8 @@ export async function ensureSheetTab(spreadsheetId: string, tabName: string): Pr
   }
 
   await writeHeaderAndFormat(spreadsheetId, sheetId, tabName);
+  tabIdCache.set(cacheKey, sheetId);
+  headerVerified.add(cacheKey);
   return { sheetId, title: tabName };
 }
 
@@ -255,9 +274,11 @@ export async function ensureSpreadsheet(
 ): Promise<EnsuredSheet> {
   const fileName = buildSheetFileName(website, month, year);
   const tabName = sanitizeTabName(platform);
+  const fileCacheKey = `${monthFolderId}|${fileName}`;
 
-  const existing = await findSpreadsheet(monthFolderId, fileName);
+  const existing = spreadsheetIdCache.get(fileCacheKey) ?? (await findSpreadsheet(monthFolderId, fileName));
   if (existing) {
+    spreadsheetIdCache.set(fileCacheKey, existing);
     const tab = await ensureSheetTab(existing, tabName);
     return { spreadsheetId: existing, sheetId: tab.sheetId, tabName: tab.title };
   }
@@ -266,6 +287,9 @@ export async function ensureSpreadsheet(
   if (actor) logSheetCreated(actor.userId, actor.username, website, `Created sheet: ${fileName} (tab: ${tabName})`, spreadsheetId);
   const tab = await findTab(spreadsheetId, tabName);
   if (!tab) throw new Error(`Tab "${tabName}" missing right after creation in ${fileName}`);
+  spreadsheetIdCache.set(fileCacheKey, spreadsheetId);
+  tabIdCache.set(`${spreadsheetId}|${tabName}`, tab.sheetId);
+  headerVerified.add(`${spreadsheetId}|${tabName}`);
   return { spreadsheetId, sheetId: tab.sheetId, tabName: tab.title };
 }
 
@@ -312,22 +336,8 @@ export async function appendRow(sheet: EnsuredSheet, data: AdsData): Promise<num
   );
   await throttle();
 
-  await withRetry(() =>
-    sheets.spreadsheets.batchUpdate({
-      spreadsheetId: sheet.spreadsheetId,
-      requestBody: {
-        requests: [
-          {
-            autoResizeDimensions: {
-              dimensions: { sheetId: sheet.sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: SHEET_HEADERS.length },
-            },
-          },
-        ],
-      },
-    })
-  );
-  await throttle();
-
+  // Columns are auto-resized once at tab creation; re-resizing after every
+  // append was a whole extra API call per save for a purely cosmetic tweak.
   return rowNumber;
 }
 
@@ -342,6 +352,39 @@ export async function getAllRows(spreadsheetId: string, tabName: string): Promis
   await throttle();
   const values = res.data.values ?? [];
   return values.map((row, idx) => ({ rowNumber: idx + 1, values: row.map((v) => String(v ?? "")) }));
+}
+
+/**
+ * Read-path variant that tolerates tabs still on the pre-Total-Click
+ * 14-column layout (notably the legacy "Data" tab, which the write path
+ * never touches or migrates). Reads the tab's own header row and, when the
+ * "Total Click" column is absent, splices a blank into each row at that
+ * position so callers can always address columns by the current layout's
+ * indices.
+ */
+export async function getAllRowsNormalized(spreadsheetId: string, tabName: string): Promise<SheetRow[]> {
+  const sheets = getSheetsClient();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: tabRange(tabName, "A1:O"),
+    })
+  );
+  await throttle();
+  const all = res.data.values ?? [];
+  if (all.length === 0) return [];
+
+  const header = (all[0] ?? []).map((v) => String(v ?? ""));
+  const totalClickIndex = SHEET_HEADERS.indexOf("Total Click");
+  const isLegacyLayout = !header.includes("Total Click");
+
+  return all.slice(1).map((row, idx) => {
+    let values = row.map((v) => String(v ?? ""));
+    if (isLegacyLayout) {
+      values = [...values.slice(0, totalClickIndex), "", ...values.slice(totalClickIndex)];
+    }
+    return { rowNumber: idx + 1, values };
+  });
 }
 
 export async function getRow(spreadsheetId: string, tabName: string, rowNumber: number): Promise<string[] | null> {

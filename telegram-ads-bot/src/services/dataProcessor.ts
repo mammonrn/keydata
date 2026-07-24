@@ -1,15 +1,15 @@
 import { AdsData } from "../types";
 import { MONTH_NAMES_EN, config } from "../config";
-import { ensureFolderStructure, listChildFolders, uploadPhoto } from "../google/drive";
+import { clearDriveCaches, ensureFolderStructure, listChildFolders, uploadPhoto } from "../google/drive";
 import {
   appendRow,
+  clearSheetCaches,
   deleteRow,
   ensureSpreadsheet,
   findSpreadsheetIdForWebsiteMonth,
   findTab,
-  getAllRows,
+  getAllRowsNormalized,
   getRow,
-  isLegacyTab,
   listSheetTabs,
   sanitizeTabName,
   updateRowValues,
@@ -61,50 +61,70 @@ export interface SaveResult {
   year: string;
 }
 
+const PHOTO_UPLOAD_CONCURRENCY = 3;
+
 export async function saveAdsData(
   data: Omit<AdsData, "photoLink" | "recordedBy" | "recordedAt">,
   photos: PhotoInput[],
   actor: Actor
 ): Promise<SaveResult> {
-  const dateObj = parseThaiDate(data.date);
-  const year = String(dateObj.getFullYear());
-  const month = MONTH_NAMES_EN[dateObj.getMonth()];
+  const startedAt = Date.now();
+  try {
+    const dateObj = parseThaiDate(data.date);
+    const year = String(dateObj.getFullYear());
+    const month = MONTH_NAMES_EN[dateObj.getMonth()];
 
-  const refs = await ensureFolderStructure(data.website, dateObj, data.platform, actor);
-  const sheet = await ensureSpreadsheet(refs.monthFolderId, data.website, month, year, data.platform, actor);
+    const refs = await ensureFolderStructure(data.website, dateObj, data.platform, actor);
+    const sheet = await ensureSpreadsheet(refs.monthFolderId, data.website, month, year, data.platform, actor);
 
-  let photoLink: string | undefined;
-  if (photos.length > 0) {
-    const links: string[] = [];
-    for (const photo of photos) {
-      const link = await uploadPhoto(refs.photosFolderId, photo.filename, photo.mimeType, photo.buffer);
-      links.push(link);
-      logPhotoUploaded(actor.userId, actor.username, data.website, `Uploaded photo: ${photo.filename} (${data.platform})`);
+    let photoLink: string | undefined;
+    if (photos.length > 0) {
+      // Uploads are independent of one another — run them in parallel,
+      // capped so a large album doesn't burst-hit the Drive rate limit.
+      const links: string[] = [];
+      for (let i = 0; i < photos.length; i += PHOTO_UPLOAD_CONCURRENCY) {
+        const chunk = photos.slice(i, i + PHOTO_UPLOAD_CONCURRENCY);
+        const chunkLinks = await Promise.all(
+          chunk.map((photo) => uploadPhoto(refs.photosFolderId, photo.filename, photo.mimeType, photo.buffer))
+        );
+        links.push(...chunkLinks);
+        for (const photo of chunk) {
+          logPhotoUploaded(actor.userId, actor.username, data.website, `Uploaded photo: ${photo.filename} (${data.platform})`);
+        }
+      }
+      // Comma-joined so each link in the cell stays individually clickable
+      // (Google Sheets auto-links every recognized URL substring in a cell).
+      photoLink = links.join(", ");
     }
-    // Comma-joined so each link in the cell stays individually clickable
-    // (Google Sheets auto-links every recognized URL substring in a cell).
-    photoLink = links.join(", ");
+
+    const recordedBy = actor.username ? `@${actor.username}` : String(actor.userId);
+    const finalData: AdsData = {
+      ...data,
+      photoLink,
+      recordedBy,
+      recordedAt: nowBangkok(),
+    };
+
+    const rowNumber = await appendRow(sheet, finalData);
+    const elapsedMs = Date.now() - startedAt;
+    logRecorded(
+      actor.userId,
+      actor.username,
+      data.website,
+      `Recorded row #${rowNumber} in ${data.website}_${month}_${year} [${sheet.tabName}] (${elapsedMs}ms)`,
+      sheet.spreadsheetId,
+      rowNumber
+    );
+
+    return { spreadsheetId: sheet.spreadsheetId, rowNumber, photoLink, website: data.website, month, year };
+  } catch (err) {
+    // A failure may mean a cached folder/file/tab id no longer exists
+    // (deleted or moved externally). Drop the caches so the next attempt
+    // re-resolves everything from the API instead of failing the same way.
+    clearDriveCaches();
+    clearSheetCaches();
+    throw err;
   }
-
-  const recordedBy = actor.username ? `@${actor.username}` : String(actor.userId);
-  const finalData: AdsData = {
-    ...data,
-    photoLink,
-    recordedBy,
-    recordedAt: nowBangkok(),
-  };
-
-  const rowNumber = await appendRow(sheet, finalData);
-  logRecorded(
-    actor.userId,
-    actor.username,
-    data.website,
-    `Recorded row #${rowNumber} in ${data.website}_${month}_${year} [${sheet.tabName}]`,
-    sheet.spreadsheetId,
-    rowNumber
-  );
-
-  return { spreadsheetId: sheet.spreadsheetId, rowNumber, photoLink, website: data.website, month, year };
 }
 
 export interface CurrentMonthSheet {
@@ -199,9 +219,12 @@ export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
     const spreadsheetId = await findSpreadsheetIdForWebsiteMonth(folder.name, month, year, now);
     if (!spreadsheetId) continue;
 
-    // Sum across every platform tab in the file. The legacy "Data" tab
-    // (pre-platform-split test data) is intentionally excluded.
-    const tabs = (await listSheetTabs(spreadsheetId)).filter((t) => !isLegacyTab(t.title));
+    // Sum across every tab in the file, including the legacy "Data" tab —
+    // reads must reflect everything actually stored, whichever code version
+    // wrote it. (Writes still never touch the legacy tab.) Normalized reads
+    // keep column positions correct even if a tab still has the old
+    // pre-Total-Click header.
+    const tabs = await listSheetTabs(spreadsheetId);
 
     let recordCount = 0;
     let totalMessageSum = 0;
@@ -211,7 +234,7 @@ export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
     let reachSum = 0;
 
     for (const tab of tabs) {
-      const rows = await getAllRows(spreadsheetId, tab.title);
+      const rows = await getAllRowsNormalized(spreadsheetId, tab.title);
       recordCount += rows.length;
       for (const row of rows) {
         // row.values indices: [1]=Date [2]=Platform [3]=TotalMessage [4]=TotalClick [5]=CPR [6]=TotalSpent [7]=Impressions [8]=Reach
@@ -241,9 +264,10 @@ export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
 
 /**
  * Lists rows for a website+month. With a platform filter, reads only the
- * matching platform tab(s); without one, merges rows from every platform
- * tab — each row still carries its Platform column, so a combined listing
- * stays unambiguous. The legacy "Data" tab is never read.
+ * matching platform tab(s); without one, merges rows from every tab in the
+ * file — including the legacy "Data" tab, so listings reflect everything
+ * actually stored. Each row carries its Platform column, so a combined
+ * listing stays unambiguous.
  */
 export async function listRows(
   website: string,
@@ -256,15 +280,23 @@ export async function listRows(
   const spreadsheetId = await findSpreadsheetIdForWebsiteMonth(website, month, year, dateForLookup);
   if (!spreadsheetId) return null;
 
-  let tabs = (await listSheetTabs(spreadsheetId)).filter((t) => !isLegacyTab(t.title));
-  if (platformFilter) {
-    tabs = tabs.filter((t) => t.title.toLowerCase().includes(platformFilter.toLowerCase()));
-  }
+  const allTabs = await listSheetTabs(spreadsheetId);
+  const filter = platformFilter?.toLowerCase();
 
   const values: string[][] = [];
-  for (const tab of tabs) {
-    const rows = await getAllRows(spreadsheetId, tab.title);
-    values.push(...rows.map((r) => r.values));
+  for (const tab of allTabs) {
+    const tabMatches = !filter || tab.title.toLowerCase().includes(filter);
+    // The legacy "Data" tab mixes platforms in one table, so a platform
+    // filter is applied to its rows' Platform column instead of the tab name.
+    const isMixedLegacyTab = tab.title === "Data";
+    if (!tabMatches && !isMixedLegacyTab) continue;
+
+    const rows = await getAllRowsNormalized(spreadsheetId, tab.title);
+    for (const r of rows) {
+      if (tabMatches || (r.values[2] ?? "").toLowerCase().includes(filter!)) {
+        values.push(r.values);
+      }
+    }
   }
   return { spreadsheetId, rows: values };
 }

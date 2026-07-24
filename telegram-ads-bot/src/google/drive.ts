@@ -52,6 +52,29 @@ async function findOrCreateFolder(
   return created;
 }
 
+// Folder ids are stable, so resolving Website/Year/Month/Photos/Platform
+// via the API on every single save (5 requests + throttles) is wasted
+// latency. Cache per path; cleared on save errors so a manually deleted
+// folder is re-resolved on the next attempt.
+const folderIdCache = new Map<string, string>();
+
+export function clearDriveCaches(): void {
+  folderIdCache.clear();
+}
+
+async function findOrCreateFolderCached(
+  cacheKey: string,
+  parentId: string,
+  name: string,
+  onCreated?: (folderId: string) => void
+): Promise<string> {
+  const hit = folderIdCache.get(cacheKey);
+  if (hit) return hit;
+  const id = await findOrCreateFolder(parentId, name, onCreated);
+  folderIdCache.set(cacheKey, id);
+  return id;
+}
+
 export async function listChildFolders(parentId: string): Promise<{ id: string; name: string }[]> {
   const drive = getDriveClient();
   const res = await withRetry(() =>
@@ -89,29 +112,34 @@ export async function ensureFolderStructure(
   const year = String(date.getFullYear());
   const month = MONTH_NAMES_EN[date.getMonth()];
 
-  const websiteFolderId = await findOrCreateFolder(config.googleDriveRootFolderId, safeWebsite, () => {
+  const websiteFolderId = await findOrCreateFolderCached(safeWebsite, config.googleDriveRootFolderId, safeWebsite, () => {
     if (actor) logFolderCreated(actor.userId, actor.username, safeWebsite, `Created website folder: ${safeWebsite}`);
   });
 
-  const yearFolderId = await findOrCreateFolder(websiteFolderId, year, () => {
+  const yearFolderId = await findOrCreateFolderCached(`${safeWebsite}/${year}`, websiteFolderId, year, () => {
     if (actor) logFolderCreated(actor.userId, actor.username, safeWebsite, `Created year folder: ${safeWebsite}/${year}`);
   });
 
-  const monthFolderId = await findOrCreateFolder(yearFolderId, month, () => {
+  const monthFolderId = await findOrCreateFolderCached(`${safeWebsite}/${year}/${month}`, yearFolderId, month, () => {
     if (actor) logFolderCreated(actor.userId, actor.username, safeWebsite, `Created month folder: ${safeWebsite}/${year}/${month}`);
   });
 
-  const photosFolderId = await findOrCreateFolder(monthFolderId, "Photos", () => {
+  const photosFolderId = await findOrCreateFolderCached(`${safeWebsite}/${year}/${month}/Photos`, monthFolderId, "Photos", () => {
     if (actor) logFolderCreated(actor.userId, actor.username, safeWebsite, `Created Photos folder: ${safeWebsite}/${year}/${month}/Photos`);
   });
 
   // Photos are grouped per platform: Photos/{Platform}/. The returned
   // photosFolderId points at the platform subfolder, which is where all
   // uploads for this record belong.
-  const platformPhotosFolderId = await findOrCreateFolder(photosFolderId, safePlatform, () => {
-    if (actor)
-      logFolderCreated(actor.userId, actor.username, safeWebsite, `Created platform photos folder: ${safeWebsite}/${year}/${month}/Photos/${safePlatform}`);
-  });
+  const platformPhotosFolderId = await findOrCreateFolderCached(
+    `${safeWebsite}/${year}/${month}/Photos/${safePlatform}`,
+    photosFolderId,
+    safePlatform,
+    () => {
+      if (actor)
+        logFolderCreated(actor.userId, actor.username, safeWebsite, `Created platform photos folder: ${safeWebsite}/${year}/${month}/Photos/${safePlatform}`);
+    }
+  );
 
   return { websiteFolderId, yearFolderId, monthFolderId, photosFolderId: platformPhotosFolderId };
 }
@@ -145,6 +173,7 @@ export async function uploadPhoto(photosFolderId: string, filename: string, mime
   );
   await throttle();
 
-  const fresh = await withRetry(() => drive.files.get({ fileId, fields: "webViewLink" }));
-  return fresh.data.webViewLink ?? `https://drive.google.com/file/d/${fileId}/view`;
+  // The create call already returned webViewLink — no need for a third
+  // request just to read it back.
+  return res.data.webViewLink ?? `https://drive.google.com/file/d/${fileId}/view`;
 }
