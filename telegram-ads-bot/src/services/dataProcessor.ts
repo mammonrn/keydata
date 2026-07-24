@@ -51,7 +51,7 @@ export interface SaveResult {
 
 export async function saveAdsData(
   data: Omit<AdsData, "photoLink" | "recordedBy" | "recordedAt">,
-  photo: PhotoInput | undefined,
+  photos: PhotoInput[],
   actor: Actor
 ): Promise<SaveResult> {
   const dateObj = parseThaiDate(data.date);
@@ -62,9 +62,16 @@ export async function saveAdsData(
   const spreadsheetId = await ensureSpreadsheet(refs.monthFolderId, data.website, month, year, actor);
 
   let photoLink: string | undefined;
-  if (photo) {
-    photoLink = await uploadPhoto(refs.photosFolderId, photo.filename, photo.mimeType, photo.buffer);
-    logPhotoUploaded(actor.userId, actor.username, data.website, `Uploaded photo: ${photo.filename}`);
+  if (photos.length > 0) {
+    const links: string[] = [];
+    for (const photo of photos) {
+      const link = await uploadPhoto(refs.photosFolderId, photo.filename, photo.mimeType, photo.buffer);
+      links.push(link);
+      logPhotoUploaded(actor.userId, actor.username, data.website, `Uploaded photo: ${photo.filename}`);
+    }
+    // Comma-joined so each link in the cell stays individually clickable
+    // (Google Sheets auto-links every recognized URL substring in a cell).
+    photoLink = links.join(", ");
   }
 
   const recordedBy = actor.username ? `@${actor.username}` : String(actor.userId);
@@ -159,12 +166,12 @@ export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
     let reachSum = 0;
 
     for (const row of rows) {
-      // row.values indices: [1]=Date [2]=Platform [3]=TotalMessage [4]=CPR [5]=TotalSpent [6]=Impressions [7]=Reach
+      // row.values indices: [1]=Date [2]=Platform [3]=TotalMessage [4]=TotalClick [5]=CPR [6]=TotalSpent [7]=Impressions [8]=Reach
       totalMessageSum += toNumber(row.values[3]);
-      cprSum += toNumber(row.values[4]);
-      totalSpentSum += toNumber(row.values[5]);
-      impressionsSum += toNumber(row.values[6]);
-      reachSum += toNumber(row.values[7]);
+      cprSum += toNumber(row.values[5]);
+      totalSpentSum += toNumber(row.values[6]);
+      impressionsSum += toNumber(row.values[7]);
+      reachSum += toNumber(row.values[8]);
     }
 
     results.push({

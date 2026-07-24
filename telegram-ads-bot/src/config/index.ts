@@ -149,6 +149,7 @@ export const SHEET_HEADERS = [
   "Date",
   "Platform",
   "Total Message",
+  "Total Click",
   "CPR (฿)",
   "Total Spent (฿)",
   "Impressions",

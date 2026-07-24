@@ -1,6 +1,7 @@
 export interface AdsData {
   date: string;
-  totalMessage: number;
+  totalMessage?: number;
+  totalClick?: number;
   cpr: number;
   totalSpent: number;
   impressions: number;
@@ -17,7 +18,6 @@ export interface AdsData {
 
 export const REQUIRED_FIELDS = [
   "date",
-  "totalMessage",
   "cpr",
   "totalSpent",
   "impressions",
@@ -28,9 +28,15 @@ export const REQUIRED_FIELDS = [
 
 export type RequiredField = (typeof REQUIRED_FIELDS)[number];
 
+// Total Message and Total Click are each optional individually, but at least
+// one of the two must be provided — this sentinel key represents that
+// combined "either/or" requirement in the missing-field flow.
+export const TOTAL_MESSAGE_OR_CLICK_FIELD = "totalMessageOrClick";
+
 export const FIELD_LABELS_TH: Record<string, string> = {
   date: "วันที่ (date)",
   totalMessage: "จำนวนข้อความ (Total Message)",
+  totalClick: "จำนวนคลิก (Total Click)",
   cpr: "CPR",
   totalSpent: "ยอดใช้จ่ายรวม (Total Spent)",
   impressions: "Impressions",
@@ -40,6 +46,7 @@ export const FIELD_LABELS_TH: Record<string, string> = {
   location: "พื้นที่ (location)",
   website: "ชื่อเว็บ (website)",
   platform: "ช่องทางโฆษณา (platform)",
+  [TOTAL_MESSAGE_OR_CLICK_FIELD]: "Total Message หรือ Total Click",
 };
 
 export type SessionStep =
@@ -68,7 +75,8 @@ export interface UserSession {
   pendingData?: Partial<AdsData>;
   missingFields?: string[];
   currentMissingField?: string;
-  pendingPhotoFileId?: string;
+  pendingPhotoFileIds?: string[];
+  pendingMediaGroupId?: string;
   confirmationMessageId?: number;
   pendingEdit?: PendingEdit;
   deleteTarget?: { row: number };

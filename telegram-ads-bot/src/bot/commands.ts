@@ -247,7 +247,7 @@ export function registerCommands(bot: Bot): void {
       return;
     }
 
-    const lines = result.rows.slice(0, 30).map((r) => `#${r[0]} | ${r[1]} | ${r[2]} | Spent: ${r[5]}฿ | CPR: ${r[4]}`);
+    const lines = result.rows.slice(0, 30).map((r) => `#${r[0]} | ${r[1]} | ${r[2]} | Spent: ${r[6]}฿ | CPR: ${r[5]}`);
     const header = `📋 ${website} - ${month}${platformFilter ? ` (${platformFilter})` : ""} (${result.rows.length} รายการ)`;
     const suffix = result.rows.length > 30 ? "\n\n(แสดง 30 รายการแรก)" : "";
     await ctx.reply(`${header}\n\n${lines.join("\n")}${suffix}`);

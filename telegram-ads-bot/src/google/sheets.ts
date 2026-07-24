@@ -106,6 +106,52 @@ async function formatHeaderAndWriteRow(spreadsheetId: string): Promise<void> {
   await throttle();
 }
 
+/**
+ * Sheets created before the "Total Click" column was added have a 14-column
+ * header (Row..Recorded At, no Total Click). Rather than blindly overwriting
+ * the header text — which would silently misalign every pre-existing row's
+ * CPR/Total Spent/etc. values under the wrong header — this inserts an
+ * actual blank column at the point where the old and current headers first
+ * diverge, then writes the current header row. Existing data cells are never
+ * edited, only shifted as a unit by the column insert, so old rows stay
+ * correctly aligned under their original headers.
+ */
+async function migrateHeaderIfNeeded(spreadsheetId: string): Promise<void> {
+  const sheets = getSheetsClient();
+  const res = await withRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `${SHEET_TAB_NAME}!A1:1` }));
+  await throttle();
+  const existingHeader = (res.data.values?.[0] ?? []).map((v) => String(v ?? ""));
+
+  const upToDate =
+    existingHeader.length === SHEET_HEADERS.length && existingHeader.every((h, i) => h === SHEET_HEADERS[i]);
+  if (upToDate) return;
+
+  if (existingHeader.length < SHEET_HEADERS.length) {
+    let insertIndex = existingHeader.findIndex((h, i) => h !== SHEET_HEADERS[i]);
+    if (insertIndex === -1) insertIndex = existingHeader.length;
+    const columnsToInsert = SHEET_HEADERS.length - existingHeader.length;
+
+    await withRetry(() =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              insertDimension: {
+                range: { sheetId: 0, dimension: "COLUMNS", startIndex: insertIndex, endIndex: insertIndex + columnsToInsert },
+                inheritFromBefore: false,
+              },
+            },
+          ],
+        },
+      })
+    );
+    await throttle();
+  }
+
+  await formatHeaderAndWriteRow(spreadsheetId);
+}
+
 export async function ensureSpreadsheet(
   monthFolderId: string,
   website: string,
@@ -115,7 +161,10 @@ export async function ensureSpreadsheet(
 ): Promise<string> {
   const fileName = buildSheetFileName(website, month, year);
   const existing = await findSpreadsheet(monthFolderId, fileName);
-  if (existing) return existing;
+  if (existing) {
+    await migrateHeaderIfNeeded(existing);
+    return existing;
+  }
 
   const spreadsheetId = await createSpreadsheet(monthFolderId, fileName);
   if (actor) logSheetCreated(actor.userId, actor.username, website, `Created sheet: ${fileName}`, spreadsheetId);
@@ -127,7 +176,8 @@ function adsDataToRow(rowNumber: number, data: AdsData): string[] {
     String(rowNumber),
     data.date,
     data.platform,
-    String(data.totalMessage),
+    data.totalMessage !== undefined && data.totalMessage !== null ? String(data.totalMessage) : "",
+    data.totalClick !== undefined && data.totalClick !== null ? String(data.totalClick) : "",
     String(data.cpr),
     String(data.totalSpent),
     String(data.impressions),
@@ -156,7 +206,7 @@ export async function appendRow(spreadsheetId: string, data: AdsData): Promise<n
   await withRetry(() =>
     sheets.spreadsheets.values.append({
       spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A:N`,
+      range: `${SHEET_TAB_NAME}!A:O`,
       valueInputOption: "USER_ENTERED",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: [adsDataToRow(rowNumber, data)] },
@@ -188,7 +238,7 @@ export async function getAllRows(spreadsheetId: string): Promise<SheetRow[]> {
   const res = await withRetry(() =>
     sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A${DATA_START_ROW}:N`,
+      range: `${SHEET_TAB_NAME}!A${DATA_START_ROW}:O`,
     })
   );
   await throttle();
@@ -208,7 +258,7 @@ export async function updateRowValues(spreadsheetId: string, rowNumber: number, 
   await withRetry(() =>
     sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A${sheetRowIndex}:N${sheetRowIndex}`,
+      range: `${SHEET_TAB_NAME}!A${sheetRowIndex}:O${sheetRowIndex}`,
       valueInputOption: "USER_ENTERED",
       requestBody: { values: [values] },
     })
@@ -248,7 +298,7 @@ export async function deleteRow(spreadsheetId: string, rowNumber: number): Promi
   await withRetry(() =>
     sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A${DATA_START_ROW}:N${DATA_START_ROW + renumbered.length - 1}`,
+      range: `${SHEET_TAB_NAME}!A${DATA_START_ROW}:O${DATA_START_ROW + renumbered.length - 1}`,
       valueInputOption: "USER_ENTERED",
       requestBody: { values: renumbered },
     })

@@ -20,7 +20,18 @@ function loadSessions(): void {
     const raw = fs.readFileSync(SESSIONS_FILE, "utf-8");
     const parsed = JSON.parse(raw) as UserSession[];
     for (const s of parsed) {
-      sessions.set(s.userId, { ...s, step: "idle", pendingData: undefined, missingFields: undefined, currentMissingField: undefined, pendingEdit: undefined, deleteTarget: undefined, deleteConfirmStage: undefined });
+      sessions.set(s.userId, {
+        ...s,
+        step: "idle",
+        pendingData: undefined,
+        missingFields: undefined,
+        currentMissingField: undefined,
+        pendingPhotoFileIds: undefined,
+        pendingMediaGroupId: undefined,
+        pendingEdit: undefined,
+        deleteTarget: undefined,
+        deleteConfirmStage: undefined,
+      });
     }
   } catch {
     // ignore corrupted backup, start fresh
@@ -58,7 +69,8 @@ export function resetSessionFlow(userId: number): UserSession {
     pendingData: undefined,
     missingFields: undefined,
     currentMissingField: undefined,
-    pendingPhotoFileId: undefined,
+    pendingPhotoFileIds: undefined,
+    pendingMediaGroupId: undefined,
     confirmationMessageId: undefined,
     pendingEdit: undefined,
     deleteTarget: undefined,
