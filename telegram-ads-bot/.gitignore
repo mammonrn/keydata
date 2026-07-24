@@ -6,3 +6,8 @@ data/*.json
 !data/.gitkeep
 *.tsbuildinfo
 .DS_Store
+.env.save
+diag.js
+get-token.js
+oauth_client.json
+logs/
