@@ -157,6 +157,41 @@ const DEFAULT_PLATFORM_ALIASES: AliasMap = {
   YouTube: ["youtube", "Youtube", "yt", "YT"],
 };
 
+function deduplicateAliasMap(map: AliasMap, defaults: AliasMap): AliasMap {
+  const groups = new Map<string, string[]>();
+  for (const key of Object.keys(map)) {
+    const lc = key.toLowerCase();
+    const list = groups.get(lc) ?? [];
+    list.push(key);
+    groups.set(lc, list);
+  }
+
+  const result: AliasMap = {};
+  for (const [lc, keys] of groups) {
+    const defKey = Object.keys(defaults).find((d) => d.toLowerCase() === lc);
+    const canonical = keys.find((k) => k === defKey) ?? defKey ?? keys[0];
+
+    const seen = new Set<string>();
+    seen.add(canonical.toLowerCase());
+    const aliases: string[] = [];
+
+    for (const key of keys) {
+      if (key !== canonical && !seen.has(key.toLowerCase())) {
+        aliases.push(key);
+        seen.add(key.toLowerCase());
+      }
+      for (const a of map[key]) {
+        if (!seen.has(a.toLowerCase())) {
+          aliases.push(a);
+          seen.add(a.toLowerCase());
+        }
+      }
+    }
+    result[canonical] = aliases;
+  }
+  return result;
+}
+
 function loadAliasMap(filePath: string, defaults: AliasMap): AliasMap {
   ensureDataDir();
   if (!fs.existsSync(filePath)) {
@@ -170,7 +205,11 @@ function loadAliasMap(filePath: string, defaults: AliasMap): AliasMap {
       for (const [key, value] of Object.entries(parsed)) {
         if (Array.isArray(value)) map[key] = value.map((v) => String(v));
       }
-      return map;
+      const deduped = deduplicateAliasMap(map, defaults);
+      if (JSON.stringify(deduped) !== JSON.stringify(map)) {
+        saveAliasMap(filePath, deduped);
+      }
+      return deduped;
     }
     return { ...defaults };
   } catch {
