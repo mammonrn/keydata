@@ -4,11 +4,51 @@ import { getDriveClient, getSheetsClient, throttle, withRetry } from "./auth";
 import { findMonthFolder, sanitizeName } from "./drive";
 import { logSheetCreated } from "../services/logger";
 
-const SHEET_TAB_NAME = "Data";
 const DATA_START_ROW = 2; // row 1 = header
+const LEGACY_TAB_NAME = "Data"; // pre-platform-split tab; left untouched, never read or written
 
 export function buildSheetFileName(website: string, month: string, year: string): string {
   return sanitizeName(`${website}_${month}_${year}`);
+}
+
+// Google Sheets tab titles cannot contain [ ] * / \ ? : and are capped at
+// 100 chars. Falls back to "Unknown" so a fully-stripped name can't produce
+// an invalid empty title.
+export function sanitizeTabName(platform: string): string {
+  const cleaned = platform.replace(/[\[\]*\/\\?:]/g, "").trim().slice(0, 90);
+  return cleaned.length > 0 ? cleaned : "Unknown";
+}
+
+// A1-notation range on a specific tab. Tab names go in single quotes with
+// internal quotes doubled, so names with spaces ("Facebook Ads") or
+// apostrophes stay valid.
+function tabRange(tabName: string, ref: string): string {
+  return `'${tabName.replace(/'/g, "''")}'!${ref}`;
+}
+
+export interface SheetTab {
+  sheetId: number;
+  title: string;
+}
+
+export async function listSheetTabs(spreadsheetId: string): Promise<SheetTab[]> {
+  const sheets = getSheetsClient();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.get({ spreadsheetId, fields: "sheets.properties(sheetId,title)" })
+  );
+  await throttle();
+  return (res.data.sheets ?? [])
+    .map((s) => ({ sheetId: s.properties?.sheetId ?? -1, title: s.properties?.title ?? "" }))
+    .filter((s) => s.sheetId >= 0 && s.title.length > 0);
+}
+
+export function isLegacyTab(title: string): boolean {
+  return title === LEGACY_TAB_NAME;
+}
+
+export async function findTab(spreadsheetId: string, tabName: string): Promise<SheetTab | null> {
+  const tabs = await listSheetTabs(spreadsheetId);
+  return tabs.find((t) => t.title === tabName) ?? null;
 }
 
 async function findSpreadsheet(monthFolderId: string, fileName: string): Promise<string | null> {
@@ -25,59 +65,13 @@ async function findSpreadsheet(monthFolderId: string, fileName: string): Promise
   return files.length > 0 ? files[0].id ?? null : null;
 }
 
-async function createSpreadsheet(monthFolderId: string, fileName: string): Promise<string> {
-  const drive = getDriveClient();
-  const sheets = getSheetsClient();
-
-  // Create directly inside the target folder via the Drive API.
-  // (Using sheets.spreadsheets.create() first creates the file in the
-  // service account's own Drive space, which has zero storage quota
-  // and fails with a permission error. Creating directly with `parents`
-  // set uses the shared folder's quota instead.)
-  const created = await withRetry(() =>
-    drive.files.create({
-      requestBody: {
-        name: fileName,
-        mimeType: "application/vnd.google-apps.spreadsheet",
-        parents: [monthFolderId],
-      },
-      fields: "id",
-    })
-  );
-  await throttle();
-
-  const spreadsheetId = created.data.id;
-  if (!spreadsheetId) throw new Error(`Failed to create spreadsheet: ${fileName}`);
-
-  // Rename the default "Sheet1" tab to our desired tab name.
-  await withRetry(() =>
-    sheets.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        requests: [
-          {
-            updateSheetProperties: {
-              properties: { sheetId: 0, title: SHEET_TAB_NAME },
-              fields: "title",
-            },
-          },
-        ],
-      },
-    })
-  );
-  await throttle();
-
-  await formatHeaderAndWriteRow(spreadsheetId);
-  return spreadsheetId;
-}
-
-async function formatHeaderAndWriteRow(spreadsheetId: string): Promise<void> {
+async function writeHeaderAndFormat(spreadsheetId: string, sheetId: number, tabName: string): Promise<void> {
   const sheets = getSheetsClient();
 
   await withRetry(() =>
     sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A1`,
+      range: tabRange(tabName, "A1"),
       valueInputOption: "RAW",
       requestBody: { values: [SHEET_HEADERS] },
     })
@@ -91,7 +85,7 @@ async function formatHeaderAndWriteRow(spreadsheetId: string): Promise<void> {
         requests: [
           {
             repeatCell: {
-              range: { sheetId: 0, startRowIndex: 0, endRowIndex: 1 },
+              range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
               cell: {
                 userEnteredFormat: {
                   textFormat: { bold: true },
@@ -103,13 +97,13 @@ async function formatHeaderAndWriteRow(spreadsheetId: string): Promise<void> {
           },
           {
             updateSheetProperties: {
-              properties: { sheetId: 0, gridProperties: { frozenRowCount: 1 } },
+              properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
               fields: "gridProperties.frozenRowCount",
             },
           },
           {
             autoResizeDimensions: {
-              dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 0, endIndex: SHEET_HEADERS.length },
+              dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: SHEET_HEADERS.length },
             },
           },
         ],
@@ -120,18 +114,17 @@ async function formatHeaderAndWriteRow(spreadsheetId: string): Promise<void> {
 }
 
 /**
- * Sheets created before the "Total Click" column was added have a 14-column
- * header (Row..Recorded At, no Total Click). Rather than blindly overwriting
- * the header text — which would silently misalign every pre-existing row's
- * CPR/Total Spent/etc. values under the wrong header — this inserts an
- * actual blank column at the point where the old and current headers first
- * diverge, then writes the current header row. Existing data cells are never
- * edited, only shifted as a unit by the column insert, so old rows stay
- * correctly aligned under their original headers.
+ * Platform tabs created before a future column addition would have a
+ * narrower header than the current SHEET_HEADERS. Same strategy as the
+ * earlier Total Click migration: insert real blank column(s) at the first
+ * divergence so existing rows shift as a unit and stay aligned under their
+ * original headers, then rewrite the header row.
  */
-async function migrateHeaderIfNeeded(spreadsheetId: string): Promise<void> {
+async function migrateTabHeaderIfNeeded(spreadsheetId: string, sheetId: number, tabName: string): Promise<void> {
   const sheets = getSheetsClient();
-  const res = await withRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `${SHEET_TAB_NAME}!A1:1` }));
+  const res = await withRetry(() =>
+    sheets.spreadsheets.values.get({ spreadsheetId, range: tabRange(tabName, "A1:1") })
+  );
   await throttle();
   const existingHeader = (res.data.values?.[0] ?? []).map((v) => String(v ?? ""));
 
@@ -151,7 +144,7 @@ async function migrateHeaderIfNeeded(spreadsheetId: string): Promise<void> {
           requests: [
             {
               insertDimension: {
-                range: { sheetId: 0, dimension: "COLUMNS", startIndex: insertIndex, endIndex: insertIndex + columnsToInsert },
+                range: { sheetId, dimension: "COLUMNS", startIndex: insertIndex, endIndex: insertIndex + columnsToInsert },
                 inheritFromBefore: false,
               },
             },
@@ -162,7 +155,94 @@ async function migrateHeaderIfNeeded(spreadsheetId: string): Promise<void> {
     await throttle();
   }
 
-  await formatHeaderAndWriteRow(spreadsheetId);
+  await writeHeaderAndFormat(spreadsheetId, sheetId, tabName);
+}
+
+/**
+ * Finds the platform's tab in the spreadsheet, creating and formatting it if
+ * absent. Returns the tab with its real sheetId — callers must use that id
+ * (never a hardcoded 0) for all id-addressed operations.
+ */
+export async function ensureSheetTab(spreadsheetId: string, tabName: string): Promise<SheetTab> {
+  const existing = await findTab(spreadsheetId, tabName);
+  if (existing) {
+    await migrateTabHeaderIfNeeded(spreadsheetId, existing.sheetId, existing.title);
+    return existing;
+  }
+
+  const sheets = getSheetsClient();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
+    })
+  );
+  await throttle();
+
+  const sheetId = res.data.replies?.[0]?.addSheet?.properties?.sheetId;
+  if (sheetId === undefined || sheetId === null) {
+    throw new Error(`Failed to create tab "${tabName}" in spreadsheet ${spreadsheetId}`);
+  }
+
+  await writeHeaderAndFormat(spreadsheetId, sheetId, tabName);
+  return { sheetId, title: tabName };
+}
+
+async function createSpreadsheet(monthFolderId: string, fileName: string, tabName: string): Promise<string> {
+  const drive = getDriveClient();
+  const sheets = getSheetsClient();
+
+  // Create directly inside the target folder via the Drive API.
+  // (Creating with sheets.spreadsheets.create() first lands the file in the
+  // creating account's own Drive space and needs a move; creating with
+  // `parents` set places it — and its storage accounting — in the shared
+  // folder from the start.)
+  const created = await withRetry(() =>
+    drive.files.create({
+      requestBody: {
+        name: fileName,
+        mimeType: "application/vnd.google-apps.spreadsheet",
+        parents: [monthFolderId],
+      },
+      fields: "id",
+    })
+  );
+  await throttle();
+
+  const spreadsheetId = created.data.id;
+  if (!spreadsheetId) throw new Error(`Failed to create spreadsheet: ${fileName}`);
+
+  // Rename the default first tab to the platform's tab name, addressing it
+  // by its real sheetId rather than assuming 0.
+  const tabs = await listSheetTabs(spreadsheetId);
+  const firstTab = tabs[0];
+  if (!firstTab) throw new Error(`New spreadsheet ${fileName} has no default tab`);
+
+  await withRetry(() =>
+    sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateSheetProperties: {
+              properties: { sheetId: firstTab.sheetId, title: tabName },
+              fields: "title",
+            },
+          },
+        ],
+      },
+    })
+  );
+  await throttle();
+
+  await writeHeaderAndFormat(spreadsheetId, firstTab.sheetId, tabName);
+  return spreadsheetId;
+}
+
+export interface EnsuredSheet {
+  spreadsheetId: string;
+  sheetId: number;
+  tabName: string;
 }
 
 export async function ensureSpreadsheet(
@@ -170,18 +250,23 @@ export async function ensureSpreadsheet(
   website: string,
   month: string,
   year: string,
+  platform: string,
   actor?: { userId: number; username?: string }
-): Promise<string> {
+): Promise<EnsuredSheet> {
   const fileName = buildSheetFileName(website, month, year);
+  const tabName = sanitizeTabName(platform);
+
   const existing = await findSpreadsheet(monthFolderId, fileName);
   if (existing) {
-    await migrateHeaderIfNeeded(existing);
-    return existing;
+    const tab = await ensureSheetTab(existing, tabName);
+    return { spreadsheetId: existing, sheetId: tab.sheetId, tabName: tab.title };
   }
 
-  const spreadsheetId = await createSpreadsheet(monthFolderId, fileName);
-  if (actor) logSheetCreated(actor.userId, actor.username, website, `Created sheet: ${fileName}`, spreadsheetId);
-  return spreadsheetId;
+  const spreadsheetId = await createSpreadsheet(monthFolderId, fileName, tabName);
+  if (actor) logSheetCreated(actor.userId, actor.username, website, `Created sheet: ${fileName} (tab: ${tabName})`, spreadsheetId);
+  const tab = await findTab(spreadsheetId, tabName);
+  if (!tab) throw new Error(`Tab "${tabName}" missing right after creation in ${fileName}`);
+  return { spreadsheetId, sheetId: tab.sheetId, tabName: tab.title };
 }
 
 function adsDataToRow(rowNumber: number, data: AdsData): string[] {
@@ -211,15 +296,15 @@ export async function findSpreadsheetIdForWebsiteMonth(website: string, month: s
   return findSpreadsheet(monthFolderId, fileName);
 }
 
-export async function appendRow(spreadsheetId: string, data: AdsData): Promise<number> {
+export async function appendRow(sheet: EnsuredSheet, data: AdsData): Promise<number> {
   const sheets = getSheetsClient();
-  const existingRows = await getAllRows(spreadsheetId);
-  const rowNumber = existingRows.length + 1;
+  const existingRows = await getAllRows(sheet.spreadsheetId, sheet.tabName);
+  const rowNumber = existingRows.length + 1; // per-tab numbering, restarts at 1 for each platform
 
   await withRetry(() =>
     sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A:O`,
+      spreadsheetId: sheet.spreadsheetId,
+      range: tabRange(sheet.tabName, "A:O"),
       valueInputOption: "USER_ENTERED",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: [adsDataToRow(rowNumber, data)] },
@@ -229,12 +314,12 @@ export async function appendRow(spreadsheetId: string, data: AdsData): Promise<n
 
   await withRetry(() =>
     sheets.spreadsheets.batchUpdate({
-      spreadsheetId,
+      spreadsheetId: sheet.spreadsheetId,
       requestBody: {
         requests: [
           {
             autoResizeDimensions: {
-              dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 0, endIndex: SHEET_HEADERS.length },
+              dimensions: { sheetId: sheet.sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: SHEET_HEADERS.length },
             },
           },
         ],
@@ -246,12 +331,12 @@ export async function appendRow(spreadsheetId: string, data: AdsData): Promise<n
   return rowNumber;
 }
 
-export async function getAllRows(spreadsheetId: string): Promise<SheetRow[]> {
+export async function getAllRows(spreadsheetId: string, tabName: string): Promise<SheetRow[]> {
   const sheets = getSheetsClient();
   const res = await withRetry(() =>
     sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A${DATA_START_ROW}:O`,
+      range: tabRange(tabName, `A${DATA_START_ROW}:O`),
     })
   );
   await throttle();
@@ -259,19 +344,19 @@ export async function getAllRows(spreadsheetId: string): Promise<SheetRow[]> {
   return values.map((row, idx) => ({ rowNumber: idx + 1, values: row.map((v) => String(v ?? "")) }));
 }
 
-export async function getRow(spreadsheetId: string, rowNumber: number): Promise<string[] | null> {
-  const rows = await getAllRows(spreadsheetId);
+export async function getRow(spreadsheetId: string, tabName: string, rowNumber: number): Promise<string[] | null> {
+  const rows = await getAllRows(spreadsheetId, tabName);
   const row = rows.find((r) => r.rowNumber === rowNumber);
   return row ? row.values : null;
 }
 
-export async function updateRowValues(spreadsheetId: string, rowNumber: number, values: string[]): Promise<void> {
+export async function updateRowValues(spreadsheetId: string, tabName: string, rowNumber: number, values: string[]): Promise<void> {
   const sheets = getSheetsClient();
   const sheetRowIndex = rowNumber + 1; // account for header row
   await withRetry(() =>
     sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A${sheetRowIndex}:O${sheetRowIndex}`,
+      range: tabRange(tabName, `A${sheetRowIndex}:O${sheetRowIndex}`),
       valueInputOption: "USER_ENTERED",
       requestBody: { values: [values] },
     })
@@ -279,7 +364,7 @@ export async function updateRowValues(spreadsheetId: string, rowNumber: number, 
   await throttle();
 }
 
-export async function deleteRow(spreadsheetId: string, rowNumber: number): Promise<void> {
+export async function deleteRow(spreadsheetId: string, tabName: string, sheetId: number, rowNumber: number): Promise<void> {
   const sheets = getSheetsClient();
   const sheetRowIndex = rowNumber + 1; // account for header row (1-indexed)
 
@@ -290,7 +375,7 @@ export async function deleteRow(spreadsheetId: string, rowNumber: number): Promi
         requests: [
           {
             deleteDimension: {
-              range: { sheetId: 0, dimension: "ROWS", startIndex: sheetRowIndex - 1, endIndex: sheetRowIndex },
+              range: { sheetId, dimension: "ROWS", startIndex: sheetRowIndex - 1, endIndex: sheetRowIndex },
             },
           },
         ],
@@ -299,7 +384,7 @@ export async function deleteRow(spreadsheetId: string, rowNumber: number): Promi
   );
   await throttle();
 
-  const remainingRows = await getAllRows(spreadsheetId);
+  const remainingRows = await getAllRows(spreadsheetId, tabName);
   if (remainingRows.length === 0) return;
 
   const renumbered = remainingRows.map((r, idx) => {
@@ -311,7 +396,7 @@ export async function deleteRow(spreadsheetId: string, rowNumber: number): Promi
   await withRetry(() =>
     sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${SHEET_TAB_NAME}!A${DATA_START_ROW}:O${DATA_START_ROW + renumbered.length - 1}`,
+      range: tabRange(tabName, `A${DATA_START_ROW}:O${DATA_START_ROW + renumbered.length - 1}`),
       valueInputOption: "USER_ENTERED",
       requestBody: { values: renumbered },
     })

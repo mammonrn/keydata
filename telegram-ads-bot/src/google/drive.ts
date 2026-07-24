@@ -81,9 +81,11 @@ export async function findMonthFolder(website: string, date: Date): Promise<stri
 export async function ensureFolderStructure(
   website: string,
   date: Date,
+  platform: string,
   actor?: { userId: number; username?: string }
 ): Promise<DriveFolderRefs> {
   const safeWebsite = sanitizeName(website);
+  const safePlatform = sanitizeName(platform) || "Unknown";
   const year = String(date.getFullYear());
   const month = MONTH_NAMES_EN[date.getMonth()];
 
@@ -103,7 +105,15 @@ export async function ensureFolderStructure(
     if (actor) logFolderCreated(actor.userId, actor.username, safeWebsite, `Created Photos folder: ${safeWebsite}/${year}/${month}/Photos`);
   });
 
-  return { websiteFolderId, yearFolderId, monthFolderId, photosFolderId };
+  // Photos are grouped per platform: Photos/{Platform}/. The returned
+  // photosFolderId points at the platform subfolder, which is where all
+  // uploads for this record belong.
+  const platformPhotosFolderId = await findOrCreateFolder(photosFolderId, safePlatform, () => {
+    if (actor)
+      logFolderCreated(actor.userId, actor.username, safeWebsite, `Created platform photos folder: ${safeWebsite}/${year}/${month}/Photos/${safePlatform}`);
+  });
+
+  return { websiteFolderId, yearFolderId, monthFolderId, photosFolderId: platformPhotosFolderId };
 }
 
 export async function uploadPhoto(photosFolderId: string, filename: string, mimeType: string, buffer: Buffer): Promise<string> {

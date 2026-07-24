@@ -188,20 +188,31 @@ export function registerCommands(bot: Bot): void {
       await ctx.reply("กรุณาตั้งค่าเว็บก่อนด้วย /setwebsite [name]");
       return;
     }
-    const sheetInfo = await findSheetForCurrentMonth(website);
-    if (!sheetInfo) {
-      await ctx.reply(`❌ ไม่พบข้อมูลของเว็บ ${website} ในเดือนนี้`);
+    const platform = session.defaultPlatform;
+    if (!platform) {
+      await ctx.reply("กรุณาตั้งค่า platform ก่อนด้วย /setplatform [name] (แต่ละ platform แยก tab กัน)");
       return;
     }
-    const row = await getRow(sheetInfo.spreadsheetId, rowNumber);
+    const sheetInfo = await findSheetForCurrentMonth(website, platform);
+    if (!sheetInfo) {
+      await ctx.reply(`❌ ไม่พบข้อมูลของเว็บ ${website} (platform: ${platform}) ในเดือนนี้`);
+      return;
+    }
+    const row = await getRow(sheetInfo.spreadsheetId, sheetInfo.tabName, rowNumber);
     if (!row) {
-      await ctx.reply(`❌ ไม่พบ row #${rowNumber}`);
+      await ctx.reply(`❌ ไม่พบ row #${rowNumber} ใน tab ${sheetInfo.tabName}`);
       return;
     }
 
     updateSession(ctx.from!.id, {
       step: "editing_field_select",
-      pendingEdit: { sheetName: `${website}_${sheetInfo.month}_${sheetInfo.year}`, spreadsheetId: sheetInfo.spreadsheetId, rowNumber },
+      pendingEdit: {
+        sheetName: `${website}_${sheetInfo.month}_${sheetInfo.year}`,
+        spreadsheetId: sheetInfo.spreadsheetId,
+        tabName: sheetInfo.tabName,
+        sheetId: sheetInfo.sheetId,
+        rowNumber,
+      },
     });
 
     const keyboard = new InlineKeyboard();
@@ -268,20 +279,31 @@ export function registerCommands(bot: Bot): void {
       await ctx.reply("กรุณาตั้งค่าเว็บก่อนด้วย /setwebsite [name]");
       return;
     }
-    const sheetInfo = await findSheetForCurrentMonth(website);
-    if (!sheetInfo) {
-      await ctx.reply(`❌ ไม่พบข้อมูลของเว็บ ${website} ในเดือนนี้`);
+    const platform = session.defaultPlatform;
+    if (!platform) {
+      await ctx.reply("กรุณาตั้งค่า platform ก่อนด้วย /setplatform [name] (แต่ละ platform แยก tab กัน)");
       return;
     }
-    const row = await getRow(sheetInfo.spreadsheetId, rowNumber);
+    const sheetInfo = await findSheetForCurrentMonth(website, platform);
+    if (!sheetInfo) {
+      await ctx.reply(`❌ ไม่พบข้อมูลของเว็บ ${website} (platform: ${platform}) ในเดือนนี้`);
+      return;
+    }
+    const row = await getRow(sheetInfo.spreadsheetId, sheetInfo.tabName, rowNumber);
     if (!row) {
-      await ctx.reply(`❌ ไม่พบ row #${rowNumber}`);
+      await ctx.reply(`❌ ไม่พบ row #${rowNumber} ใน tab ${sheetInfo.tabName}`);
       return;
     }
 
     updateSession(ctx.from!.id, {
       step: "awaiting_delete_confirmation",
-      pendingEdit: { sheetName: `${website}_${sheetInfo.month}_${sheetInfo.year}`, spreadsheetId: sheetInfo.spreadsheetId, rowNumber },
+      pendingEdit: {
+        sheetName: `${website}_${sheetInfo.month}_${sheetInfo.year}`,
+        spreadsheetId: sheetInfo.spreadsheetId,
+        tabName: sheetInfo.tabName,
+        sheetId: sheetInfo.sheetId,
+        rowNumber,
+      },
       deleteConfirmStage: 1,
     });
 

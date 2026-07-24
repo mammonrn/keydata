@@ -225,7 +225,7 @@ async function handleEditingFieldValue(ctx: Context, userId: number, text: strin
   const actor = { userId, username: ctx.from?.username };
   try {
     const website = pendingEdit.sheetName.split("_")[0];
-    const result2 = await editRowField(pendingEdit.spreadsheetId, pendingEdit.rowNumber, fieldDef.index, rawValue, actor, website);
+    const result2 = await editRowField(pendingEdit.spreadsheetId, pendingEdit.tabName, pendingEdit.rowNumber, fieldDef.index, rawValue, actor, website);
     resetSessionFlow(userId);
     if (!result2) {
       await ctx.reply(`❌ ไม่พบ row #${pendingEdit.rowNumber}`);
@@ -429,7 +429,7 @@ export function registerHandlers(bot: Bot): void {
       try {
         const website = pendingEdit.sheetName.split("_")[0];
         const actor = { userId, username: ctx.from.username };
-        const snapshot = await deleteRowWithLog(pendingEdit.spreadsheetId, pendingEdit.rowNumber, actor, website);
+        const snapshot = await deleteRowWithLog(pendingEdit.spreadsheetId, pendingEdit.tabName, pendingEdit.sheetId, pendingEdit.rowNumber, actor, website);
         resetSessionFlow(userId);
         if (!snapshot) {
           await ctx.reply(`❌ ไม่พบ row #${pendingEdit.rowNumber}`);

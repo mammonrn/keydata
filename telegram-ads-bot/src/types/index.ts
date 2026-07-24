@@ -60,6 +60,8 @@ export type SessionStep =
 export interface PendingEdit {
   sheetName: string;
   spreadsheetId: string;
+  tabName: string;
+  sheetId: number;
   rowNumber: number;
   field?: string;
 }
