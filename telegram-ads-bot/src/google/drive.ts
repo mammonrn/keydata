@@ -89,6 +89,21 @@ export async function listChildFolders(parentId: string): Promise<{ id: string; 
     .map((f) => ({ id: f.id as string, name: f.name as string }));
 }
 
+// Websites are exactly the top-level folders under the Drive root. Cached
+// briefly so the website-picker keyboard doesn't cost an API call per ask.
+let websiteListCache: { names: string[]; at: number } | null = null;
+const WEBSITE_LIST_TTL_MS = 10 * 60 * 1000;
+
+export async function listKnownWebsites(): Promise<string[]> {
+  if (websiteListCache && Date.now() - websiteListCache.at < WEBSITE_LIST_TTL_MS) {
+    return websiteListCache.names;
+  }
+  const folders = await listChildFolders(config.googleDriveRootFolderId);
+  const names = folders.map((f) => f.name).filter((n) => n.length > 0);
+  websiteListCache = { names, at: Date.now() };
+  return names;
+}
+
 export async function findMonthFolder(website: string, date: Date): Promise<string | null> {
   const safeWebsite = sanitizeName(website);
   const year = String(date.getFullYear());

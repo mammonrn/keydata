@@ -6,7 +6,12 @@ import { getSession, resetSessionFlow, updateSession } from "../services/memory"
 import { formatParsedSummary, parseAdsMessage, parseFieldAnswer, parseTotalMessageOrClickAnswer } from "./parser";
 import { EDITABLE_FIELDS } from "./fields";
 import { deleteRowWithLog, editRowField, PhotoInput, saveAdsData } from "../services/dataProcessor";
+import { listKnownWebsites } from "../google/drive";
 import { logError, logUnauthorized } from "../services/logger";
+
+// Shortcut buttons offered when asking for the website; used as a fallback
+// when the Drive folder listing is unavailable.
+const FALLBACK_WEBSITES = ["SH666", "SH999", "UB89", "88F"];
 
 const REQUIRED_FIELD_SET: readonly string[] = REQUIRED_FIELDS;
 
@@ -38,6 +43,30 @@ function missingFieldLabel(field: string): string {
   return FIELD_LABELS_TH[field] ?? field;
 }
 
+async function websitePickerKeyboard(userId: number): Promise<InlineKeyboard> {
+  let names: string[] = [];
+  try {
+    names = await listKnownWebsites();
+  } catch {
+    // Drive unavailable — fall back to the static list below.
+  }
+  if (names.length === 0) names = [...FALLBACK_WEBSITES];
+
+  // The user's /setwebsite favorite goes first as a convenience — it is
+  // only ever a button, never an auto-filled value.
+  const favorite = getSession(userId).defaultWebsite;
+  if (favorite) {
+    names = [favorite, ...names.filter((n) => n !== favorite)];
+  }
+
+  const keyboard = new InlineKeyboard();
+  names.slice(0, 12).forEach((name, idx) => {
+    keyboard.text(name, `websitepick:${name}`);
+    if (idx % 2 === 1) keyboard.row();
+  });
+  return keyboard;
+}
+
 async function askForMissingField(ctx: Context, userId: number, field: string, opts?: { fromEditMenu?: boolean }): Promise<void> {
   updateSession(userId, { step: "awaiting_field_value", currentMissingField: field });
   if (opts?.fromEditMenu) {
@@ -45,6 +74,12 @@ async function askForMissingField(ctx: Context, userId: number, field: string, o
     // doesn't discard the pending data.
     await ctx.reply(`❓ กรุณาระบุ ${missingFieldLabel(field)}:`, {
       reply_markup: new InlineKeyboard().text("🔙 กลับ", "backtofieldselect"),
+    });
+    return;
+  }
+  if (field === "website") {
+    await ctx.reply(`❓ กรุณาระบุเว็บไซต์ (กดปุ่มเลือก หรือพิมพ์ชื่อเว็บ):`, {
+      reply_markup: await websitePickerKeyboard(userId),
     });
     return;
   }
@@ -130,7 +165,11 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
   }
 
   const data: Partial<AdsData> = { ...parsed.data };
-  if (!data.website && session.defaultWebsite) data.website = session.defaultWebsite;
+  // Platform may auto-fill from /setplatform, but website must never be
+  // silently defaulted: groups mix records for several websites, and a
+  // stale session default was mis-filing other sites' data. When absent
+  // from the message, website is asked for explicitly (with shortcut
+  // buttons) like any other required field.
   if (!data.platform && session.defaultPlatform) data.platform = session.defaultPlatform;
 
   const ids = [...heldPhotoIds(session)];
@@ -270,7 +309,8 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
     if (Object.keys(parsedFull.data).length >= 2) {
       const current = getSession(userId);
       const data: Partial<AdsData> = { ...(current.pendingData ?? {}), ...parsedFull.data };
-      if (!data.website && current.defaultWebsite) data.website = current.defaultWebsite;
+      // Website is never silently defaulted (see startAdsFlow); platform may
+      // still come from /setplatform.
       if (!data.platform && current.defaultPlatform) data.platform = current.defaultPlatform;
       updateSession(userId, { pendingData: data, currentMissingField: undefined });
       await proceedAfterFieldsUpdated(ctx, userId);
@@ -378,6 +418,23 @@ export function registerHandlers(bot: Bot): void {
     if (data.startsWith("pendingedit:")) {
       const field = data.split(":")[1];
       await askForMissingField(ctx, userId, field, { fromEditMenu: true });
+      return;
+    }
+
+    if (data.startsWith("websitepick:")) {
+      const website = data.slice("websitepick:".length);
+      const session = getSession(userId);
+      if (!session.pendingData) {
+        resetSessionFlow(userId);
+        await ctx.reply("ไม่มีข้อมูลที่รอการบันทึก กรุณาส่งข้อมูลใหม่");
+        return;
+      }
+      updateSession(userId, {
+        pendingData: { ...session.pendingData, website },
+        currentMissingField: undefined,
+      });
+      await ctx.reply(`🌐 เลือกเว็บ: ${website}`);
+      await proceedAfterFieldsUpdated(ctx, userId);
       return;
     }
 

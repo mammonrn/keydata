@@ -46,6 +46,22 @@ function parseArgs(ctx: Context): string[] {
   return match.trim().length > 0 ? match.trim().split(/\s+/) : [];
 }
 
+function formatInt(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+function formatMoney(n: number): string {
+  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Formats a sheet-cell string as money when it holds a number; leaves
+// non-numeric/empty cells as-is (shown as "-").
+function formatMoneyCell(raw: string): string {
+  if (!raw) return "-";
+  const n = Number(raw);
+  return Number.isNaN(n) ? raw : formatMoney(n);
+}
+
 export function registerCommands(bot: Bot): void {
   bot.command("start", async (ctx) => {
     if (!(await requireAuthorized(ctx))) return;
@@ -73,7 +89,7 @@ export function registerCommands(bot: Bot): void {
       "/status - สถานะข้อมูลเดือนนี้",
       "/edit [row] - แก้ไขข้อมูล (ใช้ default website + เดือนปัจจุบัน)",
       "/list [website] [month] [platform] - แสดงรายการข้อมูล",
-      "/setwebsite [name] - ตั้งค่าเว็บ default",
+      "/setwebsite [name] - ตั้งเว็บโปรด (ปุ่มลัดแรกตอนถูกถาม + เว็บเป้าหมายของ /edit และ /delete — ไม่เติมอัตโนมัติตอนบันทึก)",
       "/setplatform [name] - ตั้งค่า platform default",
       "/log - แสดง log ล่าสุด 10 รายการ",
     ];
@@ -113,13 +129,12 @@ export function registerCommands(bot: Bot): void {
       for (const s of status) {
         const lines = [
           `📊 สถานะเว็บ ${s.website} - ${monthLabel}`,
-          "",
-          `📝 จำนวนรายการ: ${s.recordCount} รายการ`,
-          `💬 Total Message รวม: ${s.totalMessageSum}`,
-          `💰 CPR เฉลี่ย: ${s.cprAvg.toFixed(2)} บาท`,
-          `💵 Total Spent รวม: ${s.totalSpentSum.toFixed(2)} บาท`,
-          `👁 Impressions รวม: ${s.impressionsSum}`,
-          `📈 Reach รวม: ${s.reachSum}`,
+          `📝 จำนวนรายการ: ${formatInt(s.recordCount)} รายการ`,
+          `💬 Total Message รวม: ${formatInt(s.totalMessageSum)}`,
+          `👁 Impressions รวม: ${formatInt(s.impressionsSum)}`,
+          `📈 Reach รวม: ${formatInt(s.reachSum)}`,
+          `💰 CPR เฉลี่ย: ${formatMoney(s.cprAvg)} บาท`,
+          `💵 Total Spent รวม: ${formatMoney(s.totalSpentSum)} บาท`,
         ];
         await ctx.reply(lines.join("\n"));
       }
@@ -134,14 +149,13 @@ export function registerCommands(bot: Bot): void {
 
       const summaryLines = [
         `📊 สรุปภาพรวมทุกเว็บไซต์ - ${monthLabel}`,
-        "",
         `🌐 จำนวนเว็บไซต์ที่มีข้อมูล: ${status.length}`,
-        `📝 จำนวนรายการรวม: ${totalRecords} รายการ`,
-        `💬 Total Message รวม: ${totalMessageSum}`,
-        `💰 CPR เฉลี่ยรวม: ${overallCprAvg.toFixed(2)} บาท`,
-        `💵 Total Spent รวม: ${totalSpentSum.toFixed(2)} บาท`,
-        `👁 Impressions รวม: ${impressionsSum}`,
-        `📈 Reach รวม: ${reachSum}`,
+        `📝 จำนวนรายการรวม: ${formatInt(totalRecords)} รายการ`,
+        `💬 Total Message รวม: ${formatInt(totalMessageSum)}`,
+        `👁 Impressions รวม: ${formatInt(impressionsSum)}`,
+        `📈 Reach รวม: ${formatInt(reachSum)}`,
+        `💰 CPR เฉลี่ยรวม: ${formatMoney(overallCprAvg)} บาท`,
+        `💵 Total Spent รวม: ${formatMoney(totalSpentSum)} บาท`,
       ];
       await ctx.reply(summaryLines.join("\n"));
     } catch (err) {
@@ -158,7 +172,9 @@ export function registerCommands(bot: Bot): void {
     }
     setDefaultWebsite(ctx.from!.id, args[0]);
     logCommand(ctx.from!.id, username(ctx), `/setwebsite ${args[0]}`);
-    await ctx.reply(`✅ ตั้งค่าเว็บ default เป็น: ${args[0]}`);
+    await ctx.reply(
+      `✅ ตั้งเว็บโปรดเป็น: ${args[0]}\n\nหมายเหตุ: ระบบจะไม่เติมชื่อเว็บให้อัตโนมัติอีกต่อไป — เว็บโปรดจะแสดงเป็นปุ่มแรกตอนถูกถามหาเว็บไซต์ และใช้เป็นเว็บเป้าหมายของ /edit และ /delete`
+    );
   });
 
   bot.command("setplatform", async (ctx) => {
@@ -258,7 +274,7 @@ export function registerCommands(bot: Bot): void {
       return;
     }
 
-    const lines = result.rows.slice(0, 30).map((r) => `#${r[0]} | ${r[1]} | ${r[2]} | Spent: ${r[6]}฿ | CPR: ${r[5]}`);
+    const lines = result.rows.slice(0, 30).map((r) => `#${r[0]} | ${r[1]} | ${r[2]} | Spent: ${formatMoneyCell(r[6])}฿ | CPR: ${formatMoneyCell(r[5])}`);
     const header = `📋 ${website} - ${month}${platformFilter ? ` (${platformFilter})` : ""} (${result.rows.length} รายการ)`;
     const suffix = result.rows.length > 30 ? "\n\n(แสดง 30 รายการแรก)" : "";
     await ctx.reply(`${header}\n\n${lines.join("\n")}${suffix}`);
