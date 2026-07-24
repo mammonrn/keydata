@@ -6,6 +6,7 @@ const DATA_DIR = path.join(__dirname, "..", "..", "data");
 const USERS_FILE = path.join(DATA_DIR, "authorized-users.json");
 const GROUPS_FILE = path.join(DATA_DIR, "allowed-groups.json");
 const ALIASES_FILE = path.join(DATA_DIR, "website-aliases.json");
+const PLATFORM_ALIASES_FILE = path.join(DATA_DIR, "platform-aliases.json");
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -147,14 +148,23 @@ const DEFAULT_ALIASES: AliasMap = {
   "88F": ["88fed", "88f"],
 };
 
-function loadAliases(): AliasMap {
+const DEFAULT_PLATFORM_ALIASES: AliasMap = {
+  Facebook: ["facebook", "fb", "FB"],
+  TikTok: ["tiktok", "Tiktok", "TIKTOK", "tik tok"],
+  Google: ["google", "Google Ads", "google ads"],
+  Instagram: ["instagram", "ig", "IG"],
+  LINE: ["line", "Line"],
+  YouTube: ["youtube", "Youtube", "yt", "YT"],
+};
+
+function loadAliasMap(filePath: string, defaults: AliasMap): AliasMap {
   ensureDataDir();
-  if (!fs.existsSync(ALIASES_FILE)) {
-    fs.writeFileSync(ALIASES_FILE, JSON.stringify(DEFAULT_ALIASES, null, 2), "utf-8");
-    return { ...DEFAULT_ALIASES };
+  if (!fs.existsSync(filePath)) {
+    fs.writeFileSync(filePath, JSON.stringify(defaults, null, 2), "utf-8");
+    return { ...defaults };
   }
   try {
-    const parsed = JSON.parse(fs.readFileSync(ALIASES_FILE, "utf-8"));
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const map: AliasMap = {};
       for (const [key, value] of Object.entries(parsed)) {
@@ -162,18 +172,19 @@ function loadAliases(): AliasMap {
       }
       return map;
     }
-    return { ...DEFAULT_ALIASES };
+    return { ...defaults };
   } catch {
-    return { ...DEFAULT_ALIASES };
+    return { ...defaults };
   }
 }
 
-function saveAliases(map: AliasMap): void {
+function saveAliasMap(filePath: string, map: AliasMap): void {
   ensureDataDir();
-  fs.writeFileSync(ALIASES_FILE, JSON.stringify(map, null, 2), "utf-8");
+  fs.writeFileSync(filePath, JSON.stringify(map, null, 2), "utf-8");
 }
 
-let websiteAliases = loadAliases();
+let websiteAliases = loadAliasMap(ALIASES_FILE, DEFAULT_ALIASES);
+let platformAliases = loadAliasMap(PLATFORM_ALIASES_FILE, DEFAULT_PLATFORM_ALIASES);
 
 // Same forbidden-character strip as drive.ts sanitizeName (duplicated here
 // because drive.ts imports this module).
@@ -208,7 +219,7 @@ export function addWebsiteAlias(canonicalRaw: string, aliasRaw: string): { canon
     return { canonical, alias, added: false };
   }
   websiteAliases[canonical].push(alias);
-  saveAliases(websiteAliases);
+  saveAliasMap(ALIASES_FILE, websiteAliases);
   return { canonical, alias, added: true };
 }
 
@@ -219,6 +230,53 @@ export function isCanonicalWebsite(normalizedName: string): boolean {
 
 export function getWebsiteAliases(): Record<string, string[]> {
   return Object.fromEntries(Object.entries(websiteAliases).map(([k, v]) => [k, [...v]]));
+}
+
+// ===== Platform alias normalization =====
+
+export function normalizePlatformName(input: string): string {
+  const sanitized = sanitizeWebsiteInput(input);
+  const lc = sanitized.toLowerCase();
+  if (!lc) return sanitized;
+  for (const [canonical, aliases] of Object.entries(platformAliases)) {
+    if (canonical.toLowerCase() === lc) return canonical;
+    if (aliases.some((a) => a.toLowerCase() === lc)) return canonical;
+  }
+  return sanitized;
+}
+
+export function isCanonicalPlatform(normalizedName: string): boolean {
+  const lc = normalizedName.toLowerCase();
+  return Object.keys(platformAliases).some((k) => k.toLowerCase() === lc);
+}
+
+export function listCanonicalPlatforms(): string[] {
+  return Object.keys(platformAliases);
+}
+
+export function registerPlatformIfNew(name: string): void {
+  if (isCanonicalPlatform(name)) return;
+  platformAliases[name] = [];
+  saveAliasMap(PLATFORM_ALIASES_FILE, platformAliases);
+}
+
+export function addPlatformAlias(canonicalRaw: string, aliasRaw: string): { canonical: string; alias: string; added: boolean } {
+  const canonicalInput = sanitizeWebsiteInput(canonicalRaw);
+  const alias = sanitizeWebsiteInput(aliasRaw);
+  const existingKey = Object.keys(platformAliases).find((k) => k.toLowerCase() === canonicalInput.toLowerCase());
+  const canonical = existingKey ?? canonicalInput;
+
+  if (!platformAliases[canonical]) platformAliases[canonical] = [];
+  if (platformAliases[canonical].some((a) => a.toLowerCase() === alias.toLowerCase())) {
+    return { canonical, alias, added: false };
+  }
+  platformAliases[canonical].push(alias);
+  saveAliasMap(PLATFORM_ALIASES_FILE, platformAliases);
+  return { canonical, alias, added: true };
+}
+
+export function getPlatformAliases(): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(platformAliases).map(([k, v]) => [k, [...v]]));
 }
 
 export const MONTH_NAMES_EN = [

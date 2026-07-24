@@ -1,6 +1,6 @@
 import path from "path";
 import { Bot, Context, InlineKeyboard } from "grammy";
-import { config, isAllowedGroup, isAuthorizedUser, isSuperAdmin, normalizeWebsiteName } from "../config";
+import { config, isAllowedGroup, isAuthorizedUser, isCanonicalPlatform, isSuperAdmin, listCanonicalPlatforms, normalizePlatformName, normalizeWebsiteName } from "../config";
 import { AdsData, FIELD_LABELS_TH, REQUIRED_FIELDS, TOTAL_MESSAGE_OR_CLICK_FIELD, UserSession } from "../types";
 import { getSession, resetSessionFlow, updateSession } from "../services/memory";
 import { formatParsedSummary, parseAdsMessage, parseFieldAnswer, parseTotalMessageOrClickAnswer } from "./parser";
@@ -70,6 +70,25 @@ async function websitePickerKeyboard(userId: number): Promise<InlineKeyboard> {
   return keyboard;
 }
 
+function platformPickerKeyboard(userId: number): InlineKeyboard {
+  let names = listCanonicalPlatforms();
+
+  const favorite = getSession(userId).defaultPlatform;
+  if (favorite) {
+    names = [favorite, ...names.filter((n) => n !== favorite)];
+  }
+
+  const keyboard = new InlineKeyboard();
+  names.slice(0, 12).forEach((name, idx) => {
+    keyboard.text(name, `platformpick:${name}`);
+    if (idx % 2 === 1) keyboard.row();
+  });
+  if (isSuperAdmin(userId)) {
+    keyboard.row().text("➕ อื่นๆ", "platformother");
+  }
+  return keyboard;
+}
+
 async function askForMissingField(ctx: Context, userId: number, field: string, opts?: { fromEditMenu?: boolean }): Promise<void> {
   updateSession(userId, { step: "awaiting_field_value", currentMissingField: field });
   if (field === "website") {
@@ -78,6 +97,16 @@ async function askForMissingField(ctx: Context, userId: number, field: string, o
       keyboard.row().text("🔙 กลับ", "backtofieldselect");
     }
     await ctx.reply(`❓ กรุณาระบุเว็บไซต์ (กดปุ่มเลือก หรือพิมพ์ชื่อเว็บ):`, {
+      reply_markup: keyboard,
+    });
+    return;
+  }
+  if (field === "platform") {
+    const keyboard = platformPickerKeyboard(userId);
+    if (opts?.fromEditMenu) {
+      keyboard.row().text("🔙 กลับ", "backtofieldselect");
+    }
+    await ctx.reply(`❓ กรุณาระบุ Platform (กดปุ่มเลือก หรือพิมพ์ชื่อ Platform):`, {
       reply_markup: keyboard,
     });
     return;
@@ -177,6 +206,13 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
       delete (data as any).website;
     }
   }
+  if (data.platform) {
+    data.platform = normalizePlatformName(data.platform);
+    if (!isSuperAdmin(userId) && !isCanonicalPlatform(data.platform)) {
+      await ctx.reply(`❌ ไม่พบ Platform '${data.platform}' ในระบบ กรุณาเลือกจากรายการที่มีอยู่ หรือติดต่อ Admin เพื่อเพิ่ม Platform ใหม่`);
+      delete (data as any).platform;
+    }
+  }
   // Platform may auto-fill from /setplatform, but website must never be
   // silently defaulted: groups mix records for several websites, and a
   // stale session default was mis-filing other sites' data. When absent
@@ -266,6 +302,19 @@ async function handleAwaitingFieldValue(ctx: Context, userId: number, text: stri
       return;
     }
     data.website = website;
+  } else if (field === "platform") {
+    const platform = normalizePlatformName(String(result.value));
+    if (!platform || platform.length > 50) {
+      await ctx.reply("❌ ชื่อ Platform ไม่ถูกต้อง กรุณาพิมพ์ใหม่ (ไม่เกิน 50 ตัวอักษร):");
+      return;
+    }
+    if (!isSuperAdmin(userId) && !isCanonicalPlatform(platform)) {
+      await ctx.reply(`❌ ไม่พบ Platform '${platform}' ในระบบ กรุณาเลือกจากรายการที่มีอยู่ หรือติดต่อ Admin เพื่อเพิ่ม Platform ใหม่`, {
+        reply_markup: platformPickerKeyboard(userId),
+      });
+      return;
+    }
+    data.platform = platform;
   } else {
     (data as any)[field] = result.value;
   }
@@ -323,6 +372,17 @@ async function handleEditingFieldValue(ctx: Context, userId: number, text: strin
     return;
   }
 
+  if (fieldDef.key === "platform") {
+    const normalized = normalizePlatformName(text);
+    if (!isSuperAdmin(userId) && !isCanonicalPlatform(normalized)) {
+      await ctx.reply(`❌ ไม่พบ Platform '${normalized}' ในระบบ กรุณาเลือกจากรายการที่มีอยู่ หรือติดต่อ Admin เพื่อเพิ่ม Platform ใหม่`, {
+        reply_markup: platformPickerKeyboard(userId),
+      });
+      return;
+    }
+    text = normalized;
+  }
+
   const result = parseFieldAnswer(fieldDef.key, text, { numeric: fieldDef.numeric });
   if (result.kind === "invalid") {
     await ctx.reply(`❌ ${result.reason} กรุณาลองใหม่:`);
@@ -377,8 +437,13 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
           delete (data as any).website;
         }
       }
-      // Website is never silently defaulted (see startAdsFlow); platform may
-      // still come from /setplatform.
+      if (data.platform) {
+        data.platform = normalizePlatformName(data.platform);
+        if (!isSuperAdmin(userId) && !isCanonicalPlatform(data.platform)) {
+          await ctx.reply(`❌ ไม่พบ Platform '${data.platform}' ในระบบ กรุณาเลือกจากรายการที่มีอยู่ หรือติดต่อ Admin เพื่อเพิ่ม Platform ใหม่`);
+          delete (data as any).platform;
+        }
+      }
       if (!data.platform && current.defaultPlatform) data.platform = current.defaultPlatform;
       updateSession(userId, { pendingData: data, currentMissingField: undefined });
       await proceedAfterFieldsUpdated(ctx, userId);
@@ -540,6 +605,53 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
 
+    if (data.startsWith("platformpick:")) {
+      const pickedName = data.slice("platformpick:".length);
+      const session = getSession(userId);
+
+      if (session.step === "editing_field_value" && session.pendingEdit?.field === "2") {
+        await handleEditingFieldValue(ctx, userId, pickedName);
+        return;
+      }
+
+      const platform = normalizePlatformName(pickedName);
+      if (!session.pendingData) {
+        resetSessionFlow(userId);
+        await ctx.reply("ไม่มีข้อมูลที่รอการบันทึก กรุณาส่งข้อมูลใหม่");
+        return;
+      }
+      updateSession(userId, {
+        pendingData: { ...session.pendingData, platform },
+        currentMissingField: undefined,
+      });
+      await ctx.reply(`📱 เลือก Platform: ${platform}`);
+      await proceedAfterFieldsUpdated(ctx, userId);
+      return;
+    }
+
+    if (data === "platformother") {
+      if (!isSuperAdmin(userId)) {
+        await ctx.reply("❌ เฉพาะ Admin เท่านั้นที่สามารถเพิ่ม Platform ใหม่ได้ กรุณาเลือกจากรายการที่มีอยู่");
+        return;
+      }
+
+      const session = getSession(userId);
+
+      if (session.step === "editing_field_value" && session.pendingEdit?.field === "2") {
+        await ctx.reply("✏️ กรุณาพิมพ์ชื่อ Platform ใหม่ที่ต้องการเพิ่ม:");
+        return;
+      }
+
+      if (!session.pendingData) {
+        resetSessionFlow(userId);
+        await ctx.reply("ไม่มีข้อมูลที่รอการบันทึก กรุณาส่งข้อมูลใหม่");
+        return;
+      }
+      updateSession(userId, { step: "awaiting_field_value", currentMissingField: "platform" });
+      await ctx.reply("✏️ กรุณาพิมพ์ชื่อ Platform ใหม่ที่ต้องการเพิ่ม:");
+      return;
+    }
+
     if (data === "backtoconfirm") {
       const session = getSession(userId);
       if (!session.pendingData) {
@@ -591,6 +703,14 @@ export function registerHandlers(bot: Bot): void {
         const keyboard = await websitePickerKeyboard(userId);
         keyboard.row().text("❌ ยกเลิก", "editfield:cancel");
         await ctx.reply(`❓ กรุณาเลือกเว็บไซต์ใหม่ (กดปุ่มเลือก หรือพิมพ์ชื่อเว็บ):`, {
+          reply_markup: keyboard,
+        });
+        return;
+      }
+      if (fieldDef.key === "platform") {
+        const keyboard = platformPickerKeyboard(userId);
+        keyboard.row().text("❌ ยกเลิก", "editfield:cancel");
+        await ctx.reply(`❓ กรุณาเลือก Platform ใหม่ (กดปุ่มเลือก หรือพิมพ์ชื่อ Platform):`, {
           reply_markup: keyboard,
         });
         return;

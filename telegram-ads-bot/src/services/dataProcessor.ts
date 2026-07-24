@@ -1,5 +1,5 @@
 import { AdsData, PendingEdit } from "../types";
-import { MONTH_NAMES_EN, config, isSuperAdmin, normalizeWebsiteName } from "../config";
+import { MONTH_NAMES_EN, config, isCanonicalPlatform, isSuperAdmin, normalizePlatformName, normalizeWebsiteName, registerPlatformIfNew } from "../config";
 import { clearDriveCaches, ensureFolderStructure, isKnownWebsite, listChildFolders, moveFileToFolder, uploadPhoto } from "../google/drive";
 import {
   appendRawRow,
@@ -81,6 +81,12 @@ export async function saveAdsData(
       throw new Error(`ไม่อนุญาตให้สร้างเว็บไซต์ใหม่ '${data.website}' — เฉพาะ Admin เท่านั้น`);
     }
 
+    data = { ...data, platform: normalizePlatformName(data.platform) };
+
+    if (!isSuperAdmin(actor.userId) && !isCanonicalPlatform(data.platform)) {
+      throw new Error(`ไม่อนุญาตให้สร้าง Platform ใหม่ '${data.platform}' — เฉพาะ Admin เท่านั้น`);
+    }
+
     const dateObj = parseThaiDate(data.date);
     const year = String(dateObj.getFullYear());
     const month = MONTH_NAMES_EN[dateObj.getMonth()];
@@ -126,6 +132,8 @@ export async function saveAdsData(
       sheet.spreadsheetId,
       rowNumber
     );
+
+    registerPlatformIfNew(data.platform);
 
     return { spreadsheetId: sheet.spreadsheetId, rowNumber, photoLink, website: data.website, month, year };
   } catch (err) {

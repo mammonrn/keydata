@@ -8,6 +8,7 @@ import {
   getWebsiteAliases,
   isAuthorizedUser,
   isSuperAdmin,
+  normalizePlatformName,
   removeAllowedGroup,
   removeAuthorizedUser,
   MONTH_NAMES_EN,
@@ -188,7 +189,7 @@ export function registerCommands(bot: Bot): void {
       await ctx.reply("กรุณาระบุ platform เช่น /setplatform Facebook");
       return;
     }
-    const platform = args.join(" ");
+    const platform = normalizePlatformName(args.join(" "));
     setDefaultPlatform(ctx.from!.id, platform);
     logCommand(ctx.from!.id, username(ctx), `/setplatform ${platform}`);
     await ctx.reply(`✅ ตั้งค่า platform default เป็น: ${platform}`);
