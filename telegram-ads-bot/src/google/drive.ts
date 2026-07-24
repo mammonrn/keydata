@@ -1,5 +1,5 @@
 import { Readable } from "stream";
-import { config, MONTH_NAMES_EN } from "../config";
+import { config, isCanonicalWebsite, MONTH_NAMES_EN } from "../config";
 import { DriveFolderRefs } from "../types";
 import { getDriveClient, throttle, withRetry } from "./auth";
 import { logFolderCreated } from "../services/logger";
@@ -102,6 +102,16 @@ export async function listKnownWebsites(): Promise<string[]> {
   const names = folders.map((f) => f.name).filter((n) => n.length > 0);
   websiteListCache = { names, at: Date.now() };
   return names;
+}
+
+export async function isKnownWebsite(normalizedName: string): Promise<boolean> {
+  if (isCanonicalWebsite(normalizedName)) return true;
+  try {
+    const folders = await listKnownWebsites();
+    return folders.some((f) => f.toLowerCase() === normalizedName.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 export async function findMonthFolder(website: string, date: Date): Promise<string | null> {

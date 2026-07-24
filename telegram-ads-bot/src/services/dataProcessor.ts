@@ -1,6 +1,6 @@
 import { AdsData, PendingEdit } from "../types";
-import { MONTH_NAMES_EN, config, normalizeWebsiteName } from "../config";
-import { clearDriveCaches, ensureFolderStructure, listChildFolders, moveFileToFolder, uploadPhoto } from "../google/drive";
+import { MONTH_NAMES_EN, config, isSuperAdmin, normalizeWebsiteName } from "../config";
+import { clearDriveCaches, ensureFolderStructure, isKnownWebsite, listChildFolders, moveFileToFolder, uploadPhoto } from "../google/drive";
 import {
   appendRawRow,
   appendRow,
@@ -75,6 +75,12 @@ export async function saveAdsData(
     // Defensive re-normalization: every intake path normalizes already, but
     // this is the single choke point before folders/files get created.
     data = { ...data, website: normalizeWebsiteName(data.website) };
+
+    // Safety net: only Super Admin can create new website folders.
+    if (!isSuperAdmin(actor.userId) && !(await isKnownWebsite(data.website))) {
+      throw new Error(`ไม่อนุญาตให้สร้างเว็บไซต์ใหม่ '${data.website}' — เฉพาะ Admin เท่านั้น`);
+    }
+
     const dateObj = parseThaiDate(data.date);
     const year = String(dateObj.getFullYear());
     const month = MONTH_NAMES_EN[dateObj.getMonth()];
@@ -229,6 +235,11 @@ export async function moveRowToWebsite(edit: PendingEdit, newWebsiteRaw: string,
   const newWebsite = normalizeWebsiteName(newWebsiteRaw);
   const oldWebsite = edit.website;
   if (!newWebsite) return null;
+
+  // Safety net: only Super Admin can move rows to a new (non-existent) website.
+  if (!isSuperAdmin(actor.userId) && !(await isKnownWebsite(newWebsite))) {
+    throw new Error(`ไม่อนุญาตให้สร้างเว็บไซต์ใหม่ '${newWebsite}' — เฉพาะ Admin เท่านั้น`);
+  }
 
   const row = await getRow(edit.spreadsheetId, edit.tabName, edit.rowNumber);
   if (!row) return null;

@@ -212,6 +212,11 @@ export function addWebsiteAlias(canonicalRaw: string, aliasRaw: string): { canon
   return { canonical, alias, added: true };
 }
 
+export function isCanonicalWebsite(normalizedName: string): boolean {
+  const lc = normalizedName.toLowerCase();
+  return Object.keys(websiteAliases).some((k) => k.toLowerCase() === lc);
+}
+
 export function getWebsiteAliases(): Record<string, string[]> {
   return Object.fromEntries(Object.entries(websiteAliases).map(([k, v]) => [k, [...v]]));
 }

@@ -1,12 +1,12 @@
 import path from "path";
 import { Bot, Context, InlineKeyboard } from "grammy";
-import { config, isAllowedGroup, isAuthorizedUser, normalizeWebsiteName } from "../config";
+import { config, isAllowedGroup, isAuthorizedUser, isSuperAdmin, normalizeWebsiteName } from "../config";
 import { AdsData, FIELD_LABELS_TH, REQUIRED_FIELDS, TOTAL_MESSAGE_OR_CLICK_FIELD, UserSession } from "../types";
 import { getSession, resetSessionFlow, updateSession } from "../services/memory";
 import { formatParsedSummary, parseAdsMessage, parseFieldAnswer, parseTotalMessageOrClickAnswer } from "./parser";
 import { EDITABLE_FIELDS } from "./fields";
 import { deleteRowWithLog, editRowField, moveRowToWebsite, PhotoInput, saveAdsData } from "../services/dataProcessor";
-import { listKnownWebsites } from "../google/drive";
+import { isKnownWebsite, listKnownWebsites } from "../google/drive";
 import { logError, logUnauthorized } from "../services/logger";
 
 // Shortcut buttons offered when asking for the website; used as a fallback
@@ -64,23 +64,27 @@ async function websitePickerKeyboard(userId: number): Promise<InlineKeyboard> {
     keyboard.text(name, `websitepick:${name}`);
     if (idx % 2 === 1) keyboard.row();
   });
-  keyboard.row().text("➕ อื่นๆ", "websiteother");
+  if (isSuperAdmin(userId)) {
+    keyboard.row().text("➕ อื่นๆ", "websiteother");
+  }
   return keyboard;
 }
 
 async function askForMissingField(ctx: Context, userId: number, field: string, opts?: { fromEditMenu?: boolean }): Promise<void> {
   updateSession(userId, { step: "awaiting_field_value", currentMissingField: field });
-  if (opts?.fromEditMenu) {
-    // Entered from the ✏️ field-select menu — offer a way back to it that
-    // doesn't discard the pending data.
-    await ctx.reply(`❓ กรุณาระบุ ${missingFieldLabel(field)}:`, {
-      reply_markup: new InlineKeyboard().text("🔙 กลับ", "backtofieldselect"),
+  if (field === "website") {
+    const keyboard = await websitePickerKeyboard(userId);
+    if (opts?.fromEditMenu) {
+      keyboard.row().text("🔙 กลับ", "backtofieldselect");
+    }
+    await ctx.reply(`❓ กรุณาระบุเว็บไซต์ (กดปุ่มเลือก หรือพิมพ์ชื่อเว็บ):`, {
+      reply_markup: keyboard,
     });
     return;
   }
-  if (field === "website") {
-    await ctx.reply(`❓ กรุณาระบุเว็บไซต์ (กดปุ่มเลือก หรือพิมพ์ชื่อเว็บ):`, {
-      reply_markup: await websitePickerKeyboard(userId),
+  if (opts?.fromEditMenu) {
+    await ctx.reply(`❓ กรุณาระบุ ${missingFieldLabel(field)}:`, {
+      reply_markup: new InlineKeyboard().text("🔙 กลับ", "backtofieldselect"),
     });
     return;
   }
@@ -166,7 +170,13 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
   }
 
   const data: Partial<AdsData> = { ...parsed.data };
-  if (data.website) data.website = normalizeWebsiteName(data.website);
+  if (data.website) {
+    data.website = normalizeWebsiteName(data.website);
+    if (!isSuperAdmin(userId) && !(await isKnownWebsite(data.website))) {
+      await ctx.reply(`❌ ไม่พบเว็บไซต์ '${data.website}' ในระบบ กรุณาเลือกจากรายการที่มีอยู่ หรือติดต่อ Admin เพื่อเพิ่มเว็บใหม่`);
+      delete (data as any).website;
+    }
+  }
   // Platform may auto-fill from /setplatform, but website must never be
   // silently defaulted: groups mix records for several websites, and a
   // stale session default was mis-filing other sites' data. When absent
@@ -249,6 +259,12 @@ async function handleAwaitingFieldValue(ctx: Context, userId: number, text: stri
       await ctx.reply("❌ ชื่อเว็บไซต์ไม่ถูกต้อง กรุณาพิมพ์ใหม่ (ไม่เกิน 50 ตัวอักษร ไม่มีอักขระพิเศษ):");
       return;
     }
+    if (!isSuperAdmin(userId) && !(await isKnownWebsite(website))) {
+      await ctx.reply(`❌ ไม่พบเว็บไซต์ '${website}' ในระบบ กรุณาเลือกจากรายการที่มีอยู่ หรือติดต่อ Admin เพื่อเพิ่มเว็บใหม่`, {
+        reply_markup: await websitePickerKeyboard(userId),
+      });
+      return;
+    }
     data.website = website;
   } else {
     (data as any)[field] = result.value;
@@ -279,6 +295,12 @@ async function handleEditingFieldValue(ctx: Context, userId: number, text: strin
       const newWebsite = normalizeWebsiteName(text);
       if (!newWebsite || newWebsite.length > 50) {
         await ctx.reply("❌ ชื่อเว็บไซต์ไม่ถูกต้อง กรุณาพิมพ์ใหม่:");
+        return;
+      }
+      if (!isSuperAdmin(userId) && !(await isKnownWebsite(newWebsite))) {
+        await ctx.reply(`❌ ไม่พบเว็บไซต์ '${newWebsite}' ในระบบ กรุณาเลือกจากรายการที่มีอยู่ หรือติดต่อ Admin เพื่อเพิ่มเว็บใหม่`, {
+          reply_markup: await websitePickerKeyboard(userId),
+        });
         return;
       }
       if (newWebsite.toLowerCase() === pendingEdit.website.toLowerCase()) {
@@ -348,7 +370,13 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
     if (Object.keys(parsedFull.data).length >= 2) {
       const current = getSession(userId);
       const data: Partial<AdsData> = { ...(current.pendingData ?? {}), ...parsedFull.data };
-      if (data.website) data.website = normalizeWebsiteName(data.website);
+      if (data.website) {
+        data.website = normalizeWebsiteName(data.website);
+        if (!isSuperAdmin(userId) && !(await isKnownWebsite(data.website))) {
+          await ctx.reply(`❌ ไม่พบเว็บไซต์ '${data.website}' ในระบบ กรุณาเลือกจากรายการที่มีอยู่ หรือติดต่อ Admin เพื่อเพิ่มเว็บใหม่`);
+          delete (data as any).website;
+        }
+      }
       // Website is never silently defaulted (see startAdsFlow); platform may
       // still come from /setplatform.
       if (!data.platform && current.defaultPlatform) data.platform = current.defaultPlatform;
@@ -462,8 +490,16 @@ export function registerHandlers(bot: Bot): void {
     }
 
     if (data.startsWith("websitepick:")) {
-      const website = normalizeWebsiteName(data.slice("websitepick:".length));
+      const pickedName = data.slice("websitepick:".length);
       const session = getSession(userId);
+
+      // Post-save /edit flow: route picked website to the edit handler
+      if (session.step === "editing_field_value" && session.pendingEdit?.field === "-1") {
+        await handleEditingFieldValue(ctx, userId, pickedName);
+        return;
+      }
+
+      const website = normalizeWebsiteName(pickedName);
       if (!session.pendingData) {
         resetSessionFlow(userId);
         await ctx.reply("ไม่มีข้อมูลที่รอการบันทึก กรุณาส่งข้อมูลใหม่");
@@ -479,14 +515,26 @@ export function registerHandlers(bot: Bot): void {
     }
 
     if (data === "websiteother") {
+      // Button is hidden for non-admins, but check as defense-in-depth.
+      if (!isSuperAdmin(userId)) {
+        await ctx.reply("❌ เฉพาะ Admin เท่านั้นที่สามารถเพิ่มเว็บไซต์ใหม่ได้ กรุณาเลือกจากรายการที่มีอยู่");
+        return;
+      }
+
       const session = getSession(userId);
+
+      // Post-save /edit flow: keep step as editing_field_value so the typed
+      // answer routes to handleEditingFieldValue.
+      if (session.step === "editing_field_value" && session.pendingEdit?.field === "-1") {
+        await ctx.reply("✏️ กรุณาพิมพ์ชื่อเว็บไซต์ใหม่ที่ต้องการเพิ่ม:");
+        return;
+      }
+
       if (!session.pendingData) {
         resetSessionFlow(userId);
         await ctx.reply("ไม่มีข้อมูลที่รอการบันทึก กรุณาส่งข้อมูลใหม่");
         return;
       }
-      // Stay in the same waiting-for-website state; the typed answer flows
-      // through the normal single-field path (validated + normalized there).
       updateSession(userId, { step: "awaiting_field_value", currentMissingField: "website" });
       await ctx.reply("✏️ กรุณาพิมพ์ชื่อเว็บไซต์ใหม่ที่ต้องการเพิ่ม:");
       return;
@@ -539,6 +587,14 @@ export function registerHandlers(bot: Bot): void {
         step: "editing_field_value",
         pendingEdit: { ...session.pendingEdit, field: String(fieldDef.index) },
       });
+      if (fieldDef.key === "website") {
+        const keyboard = await websitePickerKeyboard(userId);
+        keyboard.row().text("❌ ยกเลิก", "editfield:cancel");
+        await ctx.reply(`❓ กรุณาเลือกเว็บไซต์ใหม่ (กดปุ่มเลือก หรือพิมพ์ชื่อเว็บ):`, {
+          reply_markup: keyboard,
+        });
+        return;
+      }
       await ctx.reply(`กรุณาพิมพ์ค่าใหม่สำหรับ ${fieldDef.label}:`);
       return;
     }
