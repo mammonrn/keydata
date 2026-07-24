@@ -3,7 +3,7 @@ import { Bot, Context, InlineKeyboard } from "grammy";
 import { config, isAllowedGroup, isAuthorizedUser } from "../config";
 import { AdsData, FIELD_LABELS_TH, REQUIRED_FIELDS, TOTAL_MESSAGE_OR_CLICK_FIELD, UserSession } from "../types";
 import { getSession, resetSessionFlow, updateSession } from "../services/memory";
-import { extractLooseNumber, formatParsedSummary, isSkipAnswer, parseAdsMessage, parseFieldAnswer } from "./parser";
+import { formatParsedSummary, parseAdsMessage, parseFieldAnswer, parseTotalMessageOrClickAnswer } from "./parser";
 import { EDITABLE_FIELDS } from "./fields";
 import { deleteRowWithLog, editRowField, PhotoInput, saveAdsData } from "../services/dataProcessor";
 import { logError, logUnauthorized } from "../services/logger";
@@ -108,29 +108,26 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
 
 /**
  * Handles the answer to the combined "Total Message หรือ Total Click"
- * prompt. Deliberately uses the loose number extractor (unlike the strict
- * per-field parser below) because the user is expected to optionally label
- * which of the two they mean, e.g. "Total Click: 50".
+ * prompt. The answer may carry a recognized label to pick the field
+ * ("Total Click: 50"), but the number itself is validated with the same
+ * whole-string strict rule as every other numeric Q&A answer.
  */
 async function handleTotalMessageOrClickAnswer(ctx: Context, userId: number, text: string): Promise<void> {
-  const trimmed = text.trim();
-  if (isSkipAnswer(trimmed)) {
+  const result = parseTotalMessageOrClickAnswer(text);
+
+  if (result.kind === "skip") {
     await ctx.reply("❗ ต้องระบุ Total Message หรือ Total Click อย่างน้อยหนึ่งค่า กรุณาระบุค่า:");
     return;
   }
 
-  const mentionsClick = /click/i.test(trimmed) || trimmed.includes("คลิก");
-  const targetField: "totalMessage" | "totalClick" = mentionsClick ? "totalClick" : "totalMessage";
-
-  const num = extractLooseNumber(trimmed);
-  if (num === null) {
-    await ctx.reply('❌ กรุณาระบุเป็นตัวเลข เช่น "174" หรือ "Total Click: 50"');
+  if (result.kind === "invalid") {
+    await ctx.reply(`❌ ${result.reason} เช่น "174" หรือ "Total Click: 50" กรุณาลองใหม่:`);
     return;
   }
 
   const session = getSession(userId);
   const data = { ...(session.pendingData ?? {}) } as Partial<AdsData>;
-  data[targetField] = num;
+  data[result.field] = result.value;
   updateSession(userId, { pendingData: data });
   await proceedAfterFieldsUpdated(ctx, userId);
 }

@@ -55,6 +55,13 @@ function cleanNumber(raw: string): number | null {
     .replace(/bath|baht|฿|บาท/g, "")
     .replace(/,/g, "")
     .trim();
+  // "39.64k" means 39,640 here, matching parseStrictNumericAnswer — the two
+  // parsers must agree on units or the same value would record differently
+  // depending on whether it arrived in a full message or a Q&A answer.
+  const kMatch = cleaned.match(/^(-?\d+(\.\d+)?)\s*k$/);
+  if (kMatch) {
+    return Number(kMatch[1]) * 1000;
+  }
   const match = cleaned.match(/-?\d+(\.\d+)?/);
   if (!match) return null;
   const num = Number(match[0]);
@@ -133,15 +140,43 @@ export function parseAdsMessage(rawText: string): ParseResult {
   return { data, missingRequired };
 }
 
+export type CountAnswerResult =
+  | { kind: "skip" }
+  | { kind: "invalid"; reason: string }
+  | { kind: "value"; field: "totalMessage" | "totalClick"; value: number };
+
+// Labels a user may legitimately prefix their answer with when replying to
+// the combined "Total Message หรือ Total Click" prompt. Anything else in
+// front of the number (e.g. "Date :") must cause a rejection, not a guess.
+const COUNT_LABEL_PATTERN = /^(total\s*click|total\s*message|clicks?|messages?|จำนวนคลิก|จำนวนข้อความ|คลิก)\s*[:：]?\s*/i;
+
 /**
- * Extracts a number embedded in a labelled answer, e.g. "Total Click: 50"
- * or "50 clicks" — deliberately loose (unlike parseStrictNumericAnswer)
- * because it's only used for the one special Total Message/Total Click
- * combined prompt, where the user is expected to optionally label their
- * answer.
+ * Parses the answer to the combined Total Message / Total Click prompt.
+ * An optional *recognized* label picks which field the number goes to;
+ * after stripping that label, the remainder must satisfy the same
+ * whole-string numeric rule as parseStrictNumericAnswer. A reply like
+ * "Date : 25/7/2026" has an unrecognized label and a non-numeric remainder,
+ * so it is rejected outright instead of having "25" plucked out of it.
  */
-export function extractLooseNumber(raw: string): number | null {
-  return cleanNumber(raw);
+export function parseTotalMessageOrClickAnswer(raw: string): CountAnswerResult {
+  const trimmed = raw.trim();
+  if (isSkipAnswer(trimmed)) {
+    return { kind: "skip" };
+  }
+
+  let field: "totalMessage" | "totalClick" = "totalMessage";
+  let rest = trimmed;
+  const labelMatch = trimmed.match(COUNT_LABEL_PATTERN);
+  if (labelMatch) {
+    field = /click|คลิก/i.test(labelMatch[1]) ? "totalClick" : "totalMessage";
+    rest = trimmed.slice(labelMatch[0].length);
+  }
+
+  const num = parseStrictNumericAnswer(rest);
+  if (num === null) {
+    return { kind: "invalid", reason: "กรุณาระบุเป็นตัวเลขเท่านั้น" };
+  }
+  return { kind: "value", field, value: num };
 }
 
 export type FieldAnswerResult =
@@ -166,7 +201,7 @@ export function parseFieldAnswer(field: string, raw: string, opts?: { numeric?: 
   if (numeric) {
     const num = parseStrictNumericAnswer(trimmed);
     if (num === null) {
-      return { kind: "invalid", reason: "กรุณาระบุเป็นตัวเลข" };
+      return { kind: "invalid", reason: "กรุณาระบุเป็นตัวเลขเท่านั้น" };
     }
     return { kind: "value", value: num };
   }
