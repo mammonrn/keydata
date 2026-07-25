@@ -49,6 +49,46 @@ function normalizeKey(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z0-9฀-๿]/g, "");
 }
 
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const curr = [i];
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
+    }
+    prev = curr;
+  }
+  return prev[n];
+}
+
+function fuzzyMatchField(normalizedKey: string): (TextField | NumericField) | undefined {
+  if (normalizedKey.length < 3) return undefined;
+  const maxDist = normalizedKey.length <= 4 ? 1 : 2;
+  let bestField: (TextField | NumericField) | undefined;
+  let bestDist = maxDist + 1;
+  let ambiguous = false;
+
+  for (const [alias, field] of Object.entries(FIELD_ALIASES)) {
+    if (Math.abs(normalizedKey.length - alias.length) > maxDist) continue;
+    const dist = levenshteinDistance(normalizedKey, alias);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestField = field;
+      ambiguous = false;
+    } else if (dist === bestDist && field !== bestField) {
+      ambiguous = true;
+    }
+  }
+
+  return ambiguous ? undefined : bestField;
+}
+
 function cleanNumber(raw: string): number | null {
   const cleaned = raw
     .toLowerCase()
@@ -137,22 +177,28 @@ export function isSkipAnswer(raw: string): boolean {
 export interface ParseResult {
   data: Partial<AdsData>;
   missingRequired: RequiredField[];
+  leftoverLines: string[];
 }
 
 export function parseAdsMessage(rawText: string): ParseResult {
   const data: Partial<AdsData> = {};
   const lines = rawText.split(/\r?\n/);
+  const matchedLineIndices = new Set<number>();
 
-  for (const line of lines) {
-    const match = line.match(/^\s*([^:：]+)[:：](.+)$/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const match = line.match(/^\s*([^:：]+)[:：](.+)$/)
+               ?? line.match(/^\s*(.+?)\s+-\s+(.+)$/);
     if (!match) continue;
     const keyRaw = match[1];
     const valueRaw = match[2].trim();
     if (!valueRaw) continue;
 
     const normalizedKey = normalizeKey(keyRaw);
-    const field = FIELD_ALIASES[normalizedKey];
+    const field = FIELD_ALIASES[normalizedKey] ?? fuzzyMatchField(normalizedKey);
     if (!field) continue;
+
+    matchedLineIndices.add(i);
 
     if (NUMERIC_FIELDS.includes(field as NumericField)) {
       const num = cleanNumber(valueRaw);
@@ -166,12 +212,37 @@ export function parseAdsMessage(rawText: string): ParseResult {
     }
   }
 
+  if (!data.date) {
+    for (let i = 0; i < lines.length; i++) {
+      if (matchedLineIndices.has(i)) continue;
+      const line = lines[i].trim();
+      if (!line) continue;
+      const dateMatch = line.match(/(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})/)
+                     ?? line.match(/(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})/);
+      if (dateMatch) {
+        const normalized = normalizeDateString(dateMatch[0]);
+        if (normalized) {
+          data.date = normalized;
+          matchedLineIndices.add(i);
+          break;
+        }
+      }
+    }
+  }
+
+  const leftoverLines: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (matchedLineIndices.has(i)) continue;
+    const trimmed = lines[i].trim();
+    if (trimmed) leftoverLines.push(trimmed);
+  }
+
   const missingRequired = REQUIRED_FIELDS.filter((f) => {
     const value = (data as any)[f];
     return value === undefined || value === null || value === "";
   });
 
-  return { data, missingRequired };
+  return { data, missingRequired, leftoverLines };
 }
 
 export type CountAnswerResult =

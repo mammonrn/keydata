@@ -32,6 +32,7 @@ function loadSessions(): void {
         pendingEdit: undefined,
         deleteTarget: undefined,
         deleteConfirmStage: undefined,
+        leftoverLines: undefined,
       });
     }
   } catch {
@@ -77,6 +78,7 @@ export function resetSessionFlow(userId: number): UserSession {
     pendingEdit: undefined,
     deleteTarget: undefined,
     deleteConfirmStage: undefined,
+    leftoverLines: undefined,
   });
 }
 

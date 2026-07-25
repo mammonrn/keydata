@@ -136,6 +136,36 @@ async function showConfirmation(ctx: Context, userId: number): Promise<void> {
   await ctx.reply(`โปรดตรวจสอบข้อมูล:\n\n${summary}${photoLine}\n\nยืนยันบันทึกหรือไม่?`, { reply_markup: confirmationKeyboard() });
 }
 
+async function proceedToLeftoverPicking(ctx: Context, userId: number): Promise<void> {
+  const session = getSession(userId);
+  const data = session.pendingData ?? {};
+  const leftovers = session.leftoverLines ?? [];
+
+  if (!data.adsName && leftovers.length > 0) {
+    const keyboard = new InlineKeyboard();
+    for (let i = 0; i < leftovers.length; i++) {
+      keyboard.text(leftovers[i], `adsnamepick:${i}`).row();
+    }
+    keyboard.text("➖ ไม่มี/ข้าม", "adsnameskip");
+    updateSession(userId, { step: "awaiting_adsname_pick" });
+    await ctx.reply("❓ พบข้อความที่ยังไม่ระบุ อันไหนคือ Ads Name?", { reply_markup: keyboard });
+    return;
+  }
+
+  if (!data.location && leftovers.length > 0) {
+    const keyboard = new InlineKeyboard();
+    for (let i = 0; i < leftovers.length; i++) {
+      keyboard.text(leftovers[i], `locationpick:${i}`).row();
+    }
+    keyboard.text("➖ ไม่มี/ข้าม", "locationskip");
+    updateSession(userId, { step: "awaiting_location_pick" });
+    await ctx.reply("❓ พบข้อความที่ยังไม่ระบุ อันไหนคือ Location?", { reply_markup: keyboard });
+    return;
+  }
+
+  await showConfirmation(ctx, userId);
+}
+
 async function proceedAfterFieldsUpdated(ctx: Context, userId: number): Promise<void> {
   const session = getSession(userId);
   const data = session.pendingData ?? {};
@@ -145,7 +175,7 @@ async function proceedAfterFieldsUpdated(ctx: Context, userId: number): Promise<
     await askForMissingField(ctx, userId, missing[0]);
     return;
   }
-  await showConfirmation(ctx, userId);
+  await proceedToLeftoverPicking(ctx, userId);
 }
 
 function extractPhotoFileId(ctx: Context): string | undefined {
@@ -227,6 +257,7 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
 
   updateSession(userId, {
     pendingData: data,
+    leftoverLines: parsed.leftoverLines.length > 0 ? parsed.leftoverLines : undefined,
     pendingPhotoFileIds: ids,
     pendingPhotosAt: ids.length > 0 ? Date.now() : undefined,
     pendingMediaGroupId: mediaGroupId,
@@ -411,7 +442,7 @@ async function handleEditingFieldValue(ctx: Context, userId: number, text: strin
 async function continueFlow(ctx: Context, session: UserSession, text: string, fileId?: string, mediaGroupId?: string): Promise<void> {
   const userId = session.userId;
 
-  if (fileId && (session.step === "awaiting_confirmation" || session.step === "awaiting_field_value")) {
+  if (fileId && (session.step === "awaiting_confirmation" || session.step === "awaiting_field_value" || session.step === "awaiting_adsname_pick" || session.step === "awaiting_location_pick")) {
     const count = await accumulatePhoto(userId, fileId, mediaGroupId);
     if (!text.trim()) {
       await ctx.reply(`📷 เพิ่มรูปแล้ว (รวม ${count} รูป)`);
@@ -427,7 +458,7 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
   // and discard every other field it carries, so merge it into pendingData
   // instead. (Single-field answers like "Total Click: 50" parse to 1 field
   // and still flow to the strict per-question handlers below.)
-  if ((session.step === "awaiting_field_value" || session.step === "awaiting_confirmation") && text.trim()) {
+  if ((session.step === "awaiting_field_value" || session.step === "awaiting_confirmation" || session.step === "awaiting_adsname_pick" || session.step === "awaiting_location_pick") && text.trim()) {
     const parsedFull = parseAdsMessage(text);
     if (Object.keys(parsedFull.data).length >= 2) {
       const current = getSession(userId);
@@ -447,7 +478,17 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
         }
       }
       if (!data.platform && current.defaultPlatform) data.platform = current.defaultPlatform;
-      updateSession(userId, { pendingData: data, currentMissingField: undefined });
+      const existingLeftovers = current.leftoverLines ?? [];
+      const newLeftovers = parsedFull.leftoverLines ?? [];
+      const mergedLeftovers = [...existingLeftovers];
+      for (const l of newLeftovers) {
+        if (!mergedLeftovers.includes(l)) mergedLeftovers.push(l);
+      }
+      updateSession(userId, {
+        pendingData: data,
+        leftoverLines: mergedLeftovers.length > 0 ? mergedLeftovers : undefined,
+        currentMissingField: undefined,
+      });
       await proceedAfterFieldsUpdated(ctx, userId);
       return;
     }
@@ -462,6 +503,10 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
       return;
     case "awaiting_confirmation":
       await ctx.reply("กรุณาใช้ปุ่มที่แสดงไว้ (✅ ยืนยัน / ✏️ แก้ไข / ❌ ยกเลิก) หรือพิมพ์ /cancel เพื่อยกเลิก");
+      return;
+    case "awaiting_adsname_pick":
+    case "awaiting_location_pick":
+      await ctx.reply("กรุณาใช้ปุ่มที่แสดงไว้เพื่อเลือก หรือพิมพ์ /cancel เพื่อยกเลิก");
       return;
     default:
       await ctx.reply("กรุณาใช้ปุ่มที่แสดงไว้ หรือพิมพ์ /cancel เพื่อยกเลิก");
@@ -651,6 +696,53 @@ export function registerHandlers(bot: Bot): void {
       }
       updateSession(userId, { step: "awaiting_field_value", currentMissingField: "platform" });
       await ctx.reply("✏️ กรุณาพิมพ์ชื่อ Platform ใหม่ที่ต้องการเพิ่ม:");
+      return;
+    }
+
+    if (data.startsWith("adsnamepick:")) {
+      const idx = Number(data.split(":")[1]);
+      const session = getSession(userId);
+      const leftovers = session.leftoverLines ?? [];
+      if (idx < 0 || idx >= leftovers.length || Number.isNaN(idx)) {
+        await ctx.reply("เกิดข้อผิดพลาด กรุณาลองใหม่");
+        return;
+      }
+      const picked = leftovers[idx];
+      const remaining = leftovers.filter((_, i) => i !== idx);
+      updateSession(userId, {
+        pendingData: { ...(session.pendingData ?? {}), adsName: picked },
+        leftoverLines: remaining.length > 0 ? remaining : undefined,
+      });
+      await ctx.reply(`📢 Ads Name: ${picked}`);
+      await proceedToLeftoverPicking(ctx, userId);
+      return;
+    }
+
+    if (data === "adsnameskip") {
+      await proceedToLeftoverPicking(ctx, userId);
+      return;
+    }
+
+    if (data.startsWith("locationpick:")) {
+      const idx = Number(data.split(":")[1]);
+      const session = getSession(userId);
+      const leftovers = session.leftoverLines ?? [];
+      if (idx < 0 || idx >= leftovers.length || Number.isNaN(idx)) {
+        await ctx.reply("เกิดข้อผิดพลาด กรุณาลองใหม่");
+        return;
+      }
+      const picked = leftovers[idx];
+      updateSession(userId, {
+        pendingData: { ...(session.pendingData ?? {}), location: picked },
+        leftoverLines: undefined,
+      });
+      await ctx.reply(`📍 Location: ${picked}`);
+      await showConfirmation(ctx, userId);
+      return;
+    }
+
+    if (data === "locationskip") {
+      await showConfirmation(ctx, userId);
       return;
     }
 

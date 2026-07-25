@@ -52,6 +52,8 @@ export type SessionStep =
   | "idle"
   | "awaiting_field_value"
   | "awaiting_confirmation"
+  | "awaiting_adsname_pick"
+  | "awaiting_location_pick"
   | "editing_row_select"
   | "editing_field_select"
   | "editing_field_value"
@@ -86,6 +88,7 @@ export interface UserSession {
   pendingEdit?: PendingEdit;
   deleteTarget?: { row: number };
   deleteConfirmStage?: number;
+  leftoverLines?: string[];
 }
 
 export type LogAction =
