@@ -148,7 +148,13 @@ async function showConfirmation(ctx: Context, userId: number): Promise<void> {
   const summary = formatParsedSummary(data);
   const photoCount = session.pendingPhotoFileIds?.length ?? 0;
   const photoLine = photoCount > 0 ? `\n\n📷 แนบรูปแล้ว ${photoCount} รูป` : "";
-  await ctx.reply(`โปรดตรวจสอบข้อมูล:\n\n${summary}${photoLine}\n\nยืนยันบันทึกหรือไม่?`, { reply_markup: confirmationKeyboard() });
+  const sent = await ctx.reply(`โปรดตรวจสอบข้อมูล:\n\n${summary}${photoLine}\n\nยืนยันบันทึกหรือไม่?`, {
+    reply_markup: confirmationKeyboard(),
+  });
+  // Remembered so that a "there is already a record waiting" warning can be
+  // threaded onto this exact message — in a busy group the confirmation it
+  // refers to has usually scrolled out of view by then.
+  updateSession(userId, { confirmationMessageId: sent.message_id });
 }
 
 async function proceedToLeftoverPicking(ctx: Context, userId: number): Promise<void> {
@@ -472,6 +478,67 @@ async function handleEditingFieldValue(ctx: Context, userId: number, text: strin
   }
 }
 
+/** "SH666 / Facebook", degrading gracefully when one half isn't known yet. */
+function describeRecord(data: Partial<AdsData>): string {
+  const parts = [data.website, data.platform].filter((p): p is string => Boolean(p));
+  return parts.length > 0 ? parts.join(" / ") : "ที่ค้างอยู่";
+}
+
+/**
+ * Guards the merge path against a second, unrelated ad report arriving before
+ * the one in flight was confirmed.
+ *
+ * The signal is a contradiction, not merely presence: an incoming website or
+ * platform that differs from the pending one can only mean a different
+ * record. A follow-up about the *same* record — the late caption of a photo
+ * album, an extra "Location : Bangkok" line — either repeats the same
+ * website/platform or omits them entirely, so those keep merging exactly as
+ * before. Likewise, when the pending record has no website/platform yet, an
+ * incoming one is answering that gap rather than contradicting it.
+ *
+ * Blocked messages are deliberately not stored: the user is told to settle
+ * the pending record first and re-send, which keeps one record in flight at a
+ * time and makes the loss visible instead of silent.
+ */
+async function rejectIfDifferentRecord(
+  ctx: Context,
+  session: UserSession,
+  incoming: Partial<AdsData>
+): Promise<boolean> {
+  const pending = session.pendingData;
+  if (!pending) return false;
+
+  // Normalize before comparing, or an alias ("shwe666" vs "SH666", "Tiktok"
+  // vs "TikTok") would read as a conflict and block a legitimate follow-up.
+  const website = incoming.website !== undefined ? normalizeWebsiteName(incoming.website) : undefined;
+  const platform = incoming.platform !== undefined ? normalizePlatformName(incoming.platform) : undefined;
+
+  const conflicts =
+    (website !== undefined &&
+      pending.website !== undefined &&
+      website.toLowerCase() !== pending.website.toLowerCase()) ||
+    (platform !== undefined &&
+      pending.platform !== undefined &&
+      platform.toLowerCase() !== pending.platform.toLowerCase());
+
+  if (!conflicts) return false;
+
+  const label = describeRecord(pending);
+  const instruction =
+    session.step === "awaiting_confirmation"
+      ? "กรุณากด ✅ ยืนยัน หรือ ❌ ยกเลิก รายการก่อนหน้าก่อน แล้วค่อยส่งข้อมูลใหม่อีกครั้ง"
+      : "กรุณากรอกรายการก่อนหน้าให้เสร็จ หรือพิมพ์ /cancel เพื่อยกเลิก แล้วค่อยส่งข้อมูลใหม่อีกครั้ง";
+
+  await ctx.reply(
+    `⚠️ มีรายการ ${label} รอการยืนยันอยู่\n\n${instruction}\n\n` +
+      `หมายเหตุ: ข้อมูลที่เพิ่งส่งมา (${describeRecord({ website, platform })}) ยังไม่ถูกบันทึก กรุณาส่งใหม่อีกครั้งหลังจัดการรายการก่อนหน้าเสร็จ`,
+    session.confirmationMessageId !== undefined
+      ? { reply_parameters: { message_id: session.confirmationMessageId, allow_sending_without_reply: true } }
+      : undefined
+  );
+  return true;
+}
+
 async function continueFlow(ctx: Context, session: UserSession, text: string, fileId?: string, mediaGroupId?: string): Promise<void> {
   const userId = session.userId;
 
@@ -495,6 +562,15 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
     const parsedFull = parseAdsMessage(text);
     if (Object.keys(parsedFull.data).length >= 2) {
       const current = getSession(userId);
+
+      // ...unless it is plainly a *different* record. Merging is only ever
+      // right for follow-up text about the record already in flight; when the
+      // incoming message names a website or platform that contradicts the
+      // pending one, it is a second report typed before the first was
+      // confirmed, and merging silently destroyed the first record while
+      // contaminating the second with the first's fields.
+      if (await rejectIfDifferentRecord(ctx, current, parsedFull.data)) return;
+
       const data: Partial<AdsData> = { ...(current.pendingData ?? {}), ...parsedFull.data };
       if (data.website) {
         data.website = normalizeWebsiteName(data.website);
