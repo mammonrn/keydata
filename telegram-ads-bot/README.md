@@ -117,7 +117,9 @@ pm2 status                     # ดูสถานะ
 
 ## 8. ตัวอย่างการใช้งาน
 
-ส่งข้อความในกลุ่มที่อนุญาต:
+ส่งข้อความในกลุ่มที่อนุญาต แต่ละ platform ใช้ field ต่างกันได้ ไม่ต้องมีครบทุกตัว:
+
+**Facebook Ads**
 
 ```
 date : 21/7/2026
@@ -133,8 +135,47 @@ website : SH666
 platform : Facebook
 ```
 
+**TikTok Ads**
+
+```
+21/7/2026 TikTok ads Report
+Spent budget - 5400.50 bath
+View - 120450
+Click - 3200
+Target audience - 20,45 / gambling
+website : SH666
+platform : TikTok
+```
+
+**Telegram Ads**
+
+```
+Date: 22/7/2026
+Main Budget: 50000
+Running Campaign: Summer Jackpot
+Spent Budget: 12750.25
+Views: 88000
+Clicks: 4100
+Joined: 620
+Target audience: 25,50 / casino
+website : SH666
+platform : Telegram
+```
+
+ข้อความรองรับทั้งตัวคั่น `:` และ `-`, สะกดผิดเล็กน้อยได้ (fuzzy matching) และดึงวันที่จากประโยคที่ไม่มี label ได้
+
+**field ที่บังคับมีแค่ 3 ตัว:** `date`, `website`, `platform` — ตัวเลขอื่นทั้งหมดเป็น optional
+(แต่ต้องมีข้อมูลอย่างน้อย 1 ตัวนอกเหนือจาก 3 field นี้ ไม่งั้น bot จะแจ้งว่าไม่พบข้อมูลโฆษณา)
+
 Bot จะ parse ข้อมูล แสดงสรุปให้ตรวจสอบ พร้อมปุ่ม ✅ ยืนยัน / ✏️ แก้ไข / ❌ ยกเลิก
-ถ้าข้อมูลบาง field ขาด (เช่นไม่ได้ระบุ website หรือ platform) bot จะถามกลับทันที
+ถ้า `website` หรือ `platform` ขาด bot จะถามกลับพร้อมปุ่มให้เลือก
+
+### คอลัมน์ในชีทแยกตาม platform
+
+แต่ละ platform มี sheet tab ของตัวเอง และแต่ละ tab มีชุดคอลัมน์เฉพาะของ platform นั้น
+(Facebook มี CPR/Impressions/Reach, TikTok มี Views, Telegram มี Main Budget/Joined/Running Campaign)
+platform ที่ยังไม่ได้กำหนด schema จะได้คอลัมน์ครบทุก field ที่ระบบรู้จัก
+ระบบจะ**เพิ่ม**คอลัมน์ให้ tab เดิมได้อัตโนมัติ แต่ไม่ลบคอลัมน์เดิมทิ้ง ข้อมูลเก่าจึงไม่เลื่อนตำแหน่ง
 
 ตั้งค่า default เพื่อไม่ต้องพิมพ์ website/platform ซ้ำทุกครั้ง:
 

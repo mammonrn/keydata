@@ -2,10 +2,14 @@ export interface AdsData {
   date: string;
   totalMessage?: number;
   totalClick?: number;
-  cpr: number;
-  totalSpent: number;
+  cpr?: number;
+  totalSpent?: number;
   impressions?: number;
-  reach: number;
+  reach?: number;
+  views?: number;
+  mainBudget?: number;
+  runningCampaign?: string;
+  joined?: number;
   targetAudience?: string;
   adsName?: string;
   location?: string;
@@ -16,14 +20,12 @@ export interface AdsData {
   recordedAt: string;
 }
 
-export const REQUIRED_FIELDS = [
-  "date",
-  "cpr",
-  "totalSpent",
-  "reach",
-  "website",
-  "platform",
-] as const;
+// Every platform reports a different set of numbers, so no metric can be
+// required system-wide. Only the three fields that decide *where* a row is
+// filed (which Drive folder, which spreadsheet, which tab, which date) are
+// mandatory; a record additionally needs at least one actual data field,
+// which is enforced separately by hasAnyDataField().
+export const REQUIRED_FIELDS = ["date", "website", "platform"] as const;
 
 export type RequiredField = (typeof REQUIRED_FIELDS)[number];
 
@@ -40,6 +42,10 @@ export const FIELD_LABELS_TH: Record<string, string> = {
   totalSpent: "ยอดใช้จ่ายรวม (Total Spent)",
   impressions: "Impressions",
   reach: "Reach",
+  views: "ยอดวิว (Views)",
+  mainBudget: "งบหลัก (Main Budget)",
+  runningCampaign: "แคมเปญที่รัน (Running Campaign)",
+  joined: "ยอดเข้าร่วม (Joined)",
   targetAudience: "กลุ่มเป้าหมาย (Target audience)",
   adsName: "ชื่อโฆษณา (ads name)",
   location: "พื้นที่ (location)",

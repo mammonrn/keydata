@@ -1,23 +1,39 @@
 import { AdsData, SheetRow } from "../types";
-import { SHEET_HEADERS } from "../config";
+import {
+  DataField,
+  buildHeader,
+  buildRowValues,
+  colLetter,
+  columnIndexOfField,
+  headerToFields,
+  planHeaderInsertions,
+  remapRow,
+  resolveTargetHeader,
+  schemaForPlatform,
+} from "../config";
 import { getDriveClient, getSheetsClient, throttle, withRetry } from "./auth";
 import { findMonthFolder, sanitizeName } from "./drive";
 import { logSheetCreated } from "../services/logger";
 
 const DATA_START_ROW = 2; // row 1 = header
 
-// Write-path lookup caches: spreadsheet ids, tab sheetIds, and header
-// verification are stable per file+tab, so re-resolving them on every save
-// costs several API round-trips (plus throttles) for nothing. Cleared on
-// save errors so externally deleted files/tabs get re-resolved.
+// Widest range we ever read. Comfortably past the union layout's width, so a
+// single constant works for every per-platform header without re-deriving a
+// range for reads.
+const MAX_COLUMN = "AZ";
+
+// Write-path lookup caches: spreadsheet ids, tab sheetIds, and resolved
+// headers are stable per file+tab, so re-resolving them on every save costs
+// several API round-trips (plus throttles) for nothing. Cleared on save
+// errors so externally deleted files/tabs get re-resolved.
 const spreadsheetIdCache = new Map<string, string>();
 const tabIdCache = new Map<string, number>();
-const headerVerified = new Set<string>();
+const headerCache = new Map<string, string[]>();
 
 export function clearSheetCaches(): void {
   spreadsheetIdCache.clear();
   tabIdCache.clear();
-  headerVerified.clear();
+  headerCache.clear();
 }
 
 export function buildSheetFileName(website: string, month: string, year: string): string {
@@ -74,7 +90,22 @@ async function findSpreadsheet(monthFolderId: string, fileName: string): Promise
   return files.length > 0 ? files[0].id ?? null : null;
 }
 
-async function writeHeaderAndFormat(spreadsheetId: string, sheetId: number, tabName: string): Promise<void> {
+/** Reads a tab's header row. Empty array when the tab has no header yet. */
+export async function getTabHeader(spreadsheetId: string, tabName: string): Promise<string[]> {
+  const sheets = getSheetsClient();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.values.get({ spreadsheetId, range: tabRange(tabName, `A1:${MAX_COLUMN}1`) })
+  );
+  await throttle();
+  return (res.data.values?.[0] ?? []).map((v) => String(v ?? "")).filter((v) => v.length > 0);
+}
+
+async function writeHeaderAndFormat(
+  spreadsheetId: string,
+  sheetId: number,
+  tabName: string,
+  header: string[]
+): Promise<void> {
   const sheets = getSheetsClient();
 
   await withRetry(() =>
@@ -82,7 +113,7 @@ async function writeHeaderAndFormat(spreadsheetId: string, sheetId: number, tabN
       spreadsheetId,
       range: tabRange(tabName, "A1"),
       valueInputOption: "RAW",
-      requestBody: { values: [SHEET_HEADERS] },
+      requestBody: { values: [header] },
     })
   );
   await throttle();
@@ -112,7 +143,7 @@ async function writeHeaderAndFormat(spreadsheetId: string, sheetId: number, tabN
           },
           {
             autoResizeDimensions: {
-              dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: SHEET_HEADERS.length },
+              dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: header.length },
             },
           },
         ],
@@ -123,68 +154,95 @@ async function writeHeaderAndFormat(spreadsheetId: string, sheetId: number, tabN
 }
 
 /**
- * Platform tabs created before a future column addition would have a
- * narrower header than the current SHEET_HEADERS. Same strategy as the
- * earlier Total Click migration: insert real blank column(s) at the first
- * divergence so existing rows shift as a unit and stay aligned under their
- * original headers, then rewrite the header row.
+ * Widens an existing tab to the header its platform schema (plus whatever
+ * it already has, plus whatever is about to be written) calls for.
+ *
+ * Only ever inserts columns: real blank columns go in at each divergence
+ * point so existing rows shift as a unit and stay aligned under their
+ * original headers. Insertions are applied right-to-left so earlier indices
+ * remain valid as the grid grows. If the existing header can't be expressed
+ * as a subsequence of the target — a hand-edited tab, or the legacy mixed
+ * "Data" tab — the tab is left exactly as it is and its own header becomes
+ * the layout used for writes.
  */
-async function migrateTabHeaderIfNeeded(spreadsheetId: string, sheetId: number, tabName: string): Promise<void> {
-  const sheets = getSheetsClient();
-  const res = await withRetry(() =>
-    sheets.spreadsheets.values.get({ spreadsheetId, range: tabRange(tabName, "A1:1") })
-  );
-  await throttle();
-  const existingHeader = (res.data.values?.[0] ?? []).map((v) => String(v ?? ""));
+async function migrateTabHeaderIfNeeded(
+  spreadsheetId: string,
+  sheetId: number,
+  tabName: string,
+  platform: string,
+  neededFields: Iterable<DataField>
+): Promise<string[]> {
+  const existingHeader = await getTabHeader(spreadsheetId, tabName);
+  if (existingHeader.length === 0) {
+    const header = buildHeader(new Set([...schemaForPlatform(platform), ...neededFields]));
+    await writeHeaderAndFormat(spreadsheetId, sheetId, tabName, header);
+    return header;
+  }
 
+  const target = resolveTargetHeader(existingHeader, platform, neededFields);
   const upToDate =
-    existingHeader.length === SHEET_HEADERS.length && existingHeader.every((h, i) => h === SHEET_HEADERS[i]);
-  if (upToDate) return;
+    existingHeader.length === target.length && existingHeader.every((h, i) => h.trim() === target[i].trim());
+  if (upToDate) return existingHeader;
 
-  if (existingHeader.length < SHEET_HEADERS.length) {
-    let insertIndex = existingHeader.findIndex((h, i) => h !== SHEET_HEADERS[i]);
-    if (insertIndex === -1) insertIndex = existingHeader.length;
-    const columnsToInsert = SHEET_HEADERS.length - existingHeader.length;
+  const insertions = planHeaderInsertions(existingHeader, target);
+  if (!insertions) {
+    // Unrecognizable layout — never rewrite it, just use it as-is.
+    return existingHeader;
+  }
 
-    await withRetry(() =>
-      sheets.spreadsheets.batchUpdate({
-        spreadsheetId,
-        requestBody: {
-          requests: [
-            {
-              insertDimension: {
-                range: { sheetId, dimension: "COLUMNS", startIndex: insertIndex, endIndex: insertIndex + columnsToInsert },
-                inheritFromBefore: false,
-              },
-            },
-          ],
-        },
-      })
-    );
+  const requests = [...insertions]
+    .reverse()
+    .map(({ index, count }) => ({
+      insertDimension: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: index, endIndex: index + count },
+        inheritFromBefore: false,
+      },
+    }));
+
+  if (requests.length > 0) {
+    const sheets = getSheetsClient();
+    await withRetry(() => sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } }));
     await throttle();
   }
 
-  await writeHeaderAndFormat(spreadsheetId, sheetId, tabName);
+  await writeHeaderAndFormat(spreadsheetId, sheetId, tabName, target);
+  return target;
+}
+
+export interface EnsuredTab extends SheetTab {
+  header: string[];
 }
 
 /**
  * Finds the platform's tab in the spreadsheet, creating and formatting it if
- * absent. Returns the tab with its real sheetId — callers must use that id
- * (never a hardcoded 0) for all id-addressed operations.
+ * absent, and widening its header when the schema (or the record about to be
+ * written) needs columns it doesn't have yet. Returns the tab with its real
+ * sheetId — callers must use that id (never a hardcoded 0) for all
+ * id-addressed operations — plus the header its rows must be laid out
+ * against.
  */
-export async function ensureSheetTab(spreadsheetId: string, tabName: string): Promise<SheetTab> {
+export async function ensureSheetTab(
+  spreadsheetId: string,
+  tabName: string,
+  platform: string,
+  neededFields: Iterable<DataField> = []
+): Promise<EnsuredTab> {
   const cacheKey = `${spreadsheetId}|${tabName}`;
   const cachedSheetId = tabIdCache.get(cacheKey);
-  if (cachedSheetId !== undefined && headerVerified.has(cacheKey)) {
-    return { sheetId: cachedSheetId, title: tabName };
+  const cachedHeader = headerCache.get(cacheKey);
+  // A cached header is only reusable when it already covers every field this
+  // write needs; otherwise the tab has to be widened first.
+  if (cachedSheetId !== undefined && cachedHeader) {
+    const covered = [...neededFields].every((f) => columnIndexOfField(cachedHeader, f) >= 0);
+    if (covered) return { sheetId: cachedSheetId, title: tabName, header: cachedHeader };
   }
 
   const existing = await findTab(spreadsheetId, tabName);
   if (existing) {
-    await migrateTabHeaderIfNeeded(spreadsheetId, existing.sheetId, existing.title);
+    const header = await migrateTabHeaderIfNeeded(spreadsheetId, existing.sheetId, existing.title, platform, neededFields);
     tabIdCache.set(cacheKey, existing.sheetId);
-    headerVerified.add(cacheKey);
-    return existing;
+    headerCache.set(cacheKey, header);
+    return { ...existing, header };
   }
 
   const sheets = getSheetsClient();
@@ -201,10 +259,11 @@ export async function ensureSheetTab(spreadsheetId: string, tabName: string): Pr
     throw new Error(`Failed to create tab "${tabName}" in spreadsheet ${spreadsheetId}`);
   }
 
-  await writeHeaderAndFormat(spreadsheetId, sheetId, tabName);
+  const header = buildHeader(new Set([...schemaForPlatform(platform), ...neededFields]));
+  await writeHeaderAndFormat(spreadsheetId, sheetId, tabName, header);
   tabIdCache.set(cacheKey, sheetId);
-  headerVerified.add(cacheKey);
-  return { sheetId, title: tabName };
+  headerCache.set(cacheKey, header);
+  return { sheetId, title: tabName, header };
 }
 
 async function createSpreadsheet(monthFolderId: string, fileName: string, tabName: string): Promise<string> {
@@ -254,7 +313,6 @@ async function createSpreadsheet(monthFolderId: string, fileName: string, tabNam
   );
   await throttle();
 
-  await writeHeaderAndFormat(spreadsheetId, firstTab.sheetId, tabName);
   return spreadsheetId;
 }
 
@@ -262,6 +320,7 @@ export interface EnsuredSheet {
   spreadsheetId: string;
   sheetId: number;
   tabName: string;
+  header: string[];
 }
 
 export async function ensureSpreadsheet(
@@ -270,7 +329,8 @@ export async function ensureSpreadsheet(
   month: string,
   year: string,
   platform: string,
-  actor?: { userId: number; username?: string }
+  actor?: { userId: number; username?: string },
+  neededFields: Iterable<DataField> = []
 ): Promise<EnsuredSheet> {
   const fileName = buildSheetFileName(website, month, year);
   const tabName = sanitizeTabName(platform);
@@ -279,38 +339,15 @@ export async function ensureSpreadsheet(
   const existing = spreadsheetIdCache.get(fileCacheKey) ?? (await findSpreadsheet(monthFolderId, fileName));
   if (existing) {
     spreadsheetIdCache.set(fileCacheKey, existing);
-    const tab = await ensureSheetTab(existing, tabName);
-    return { spreadsheetId: existing, sheetId: tab.sheetId, tabName: tab.title };
+    const tab = await ensureSheetTab(existing, tabName, platform, neededFields);
+    return { spreadsheetId: existing, sheetId: tab.sheetId, tabName: tab.title, header: tab.header };
   }
 
   const spreadsheetId = await createSpreadsheet(monthFolderId, fileName, tabName);
   if (actor) logSheetCreated(actor.userId, actor.username, website, `Created sheet: ${fileName} (tab: ${tabName})`, spreadsheetId);
-  const tab = await findTab(spreadsheetId, tabName);
-  if (!tab) throw new Error(`Tab "${tabName}" missing right after creation in ${fileName}`);
   spreadsheetIdCache.set(fileCacheKey, spreadsheetId);
-  tabIdCache.set(`${spreadsheetId}|${tabName}`, tab.sheetId);
-  headerVerified.add(`${spreadsheetId}|${tabName}`);
-  return { spreadsheetId, sheetId: tab.sheetId, tabName: tab.title };
-}
-
-function adsDataToRow(rowNumber: number, data: AdsData): string[] {
-  return [
-    String(rowNumber),
-    data.date,
-    data.platform,
-    data.totalMessage !== undefined && data.totalMessage !== null ? String(data.totalMessage) : "",
-    data.totalClick !== undefined && data.totalClick !== null ? String(data.totalClick) : "",
-    String(data.cpr),
-    String(data.totalSpent),
-    data.impressions !== undefined && data.impressions !== null ? String(data.impressions) : "",
-    String(data.reach),
-    data.targetAudience ?? "",
-    data.adsName ?? "",
-    data.location ?? "",
-    data.photoLink ?? "",
-    data.recordedBy,
-    data.recordedAt,
-  ];
+  const tab = await ensureSheetTab(spreadsheetId, tabName, platform, neededFields);
+  return { spreadsheetId, sheetId: tab.sheetId, tabName: tab.title, header: tab.header };
 }
 
 export async function findSpreadsheetIdForWebsiteMonth(website: string, month: string, year: string, date: Date): Promise<string | null> {
@@ -324,14 +361,15 @@ export async function appendRow(sheet: EnsuredSheet, data: AdsData): Promise<num
   const sheets = getSheetsClient();
   const existingRows = await getAllRows(sheet.spreadsheetId, sheet.tabName);
   const rowNumber = existingRows.length + 1; // per-tab numbering, restarts at 1 for each platform
+  const values = buildRowValues(sheet.header, rowNumber, data);
 
   await withRetry(() =>
     sheets.spreadsheets.values.append({
       spreadsheetId: sheet.spreadsheetId,
-      range: tabRange(sheet.tabName, "A:O"),
+      range: tabRange(sheet.tabName, `A:${colLetter(sheet.header.length)}`),
       valueInputOption: "USER_ENTERED",
       insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [adsDataToRow(rowNumber, data)] },
+      requestBody: { values: [values] },
     })
   );
   await throttle();
@@ -342,27 +380,31 @@ export async function appendRow(sheet: EnsuredSheet, data: AdsData): Promise<num
 }
 
 /**
- * Appends an already-materialized row (as stored cell strings) to a tab,
- * assigning the destination tab's next row number in column A. Used when
- * moving a row between spreadsheets, where the values must be preserved
- * verbatim rather than rebuilt from AdsData.
+ * Appends an already-materialized row to a tab, re-laying its cells against
+ * the destination tab's header and assigning that tab's next row number in
+ * column A. Used when moving a row between spreadsheets: source and
+ * destination tabs can have different layouts, so cells are matched by what
+ * their column *means*, never by position.
  */
-export async function appendRawRow(sheet: EnsuredSheet, values: string[]): Promise<number> {
+export async function appendRawRow(
+  sheet: EnsuredSheet,
+  srcHeader: string[],
+  srcValues: string[]
+): Promise<number> {
   const sheets = getSheetsClient();
   const existingRows = await getAllRows(sheet.spreadsheetId, sheet.tabName);
   const rowNumber = existingRows.length + 1;
 
-  const padded = [...values];
-  while (padded.length < SHEET_HEADERS.length) padded.push("");
-  padded[0] = String(rowNumber);
+  const values = remapRow(srcHeader, srcValues, sheet.header);
+  values[0] = String(rowNumber);
 
   await withRetry(() =>
     sheets.spreadsheets.values.append({
       spreadsheetId: sheet.spreadsheetId,
-      range: tabRange(sheet.tabName, "A:O"),
+      range: tabRange(sheet.tabName, `A:${colLetter(sheet.header.length)}`),
       valueInputOption: "USER_ENTERED",
       insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [padded.slice(0, SHEET_HEADERS.length)] },
+      requestBody: { values: [values] },
     })
   );
   await throttle();
@@ -375,7 +417,7 @@ export async function getAllRows(spreadsheetId: string, tabName: string): Promis
   const res = await withRetry(() =>
     sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: tabRange(tabName, `A${DATA_START_ROW}:O`),
+      range: tabRange(tabName, `A${DATA_START_ROW}:${MAX_COLUMN}`),
     })
   );
   await throttle();
@@ -383,37 +425,35 @@ export async function getAllRows(spreadsheetId: string, tabName: string): Promis
   return values.map((row, idx) => ({ rowNumber: idx + 1, values: row.map((v) => String(v ?? "")) }));
 }
 
+export interface TabContents {
+  header: string[];
+  rows: SheetRow[];
+}
+
 /**
- * Read-path variant that tolerates tabs still on the pre-Total-Click
- * 14-column layout (notably the legacy "Data" tab, which the write path
- * never touches or migrates). Reads the tab's own header row and, when the
- * "Total Click" column is absent, splices a blank into each row at that
- * position so callers can always address columns by the current layout's
- * indices.
+ * Reads a tab together with its own header row. Every read path goes through
+ * this: with per-platform layouts there is no universal column order to
+ * normalize to, so callers address cells by field name against the header
+ * they get back (see cellOf/columnIndexOfField).
  */
-export async function getAllRowsNormalized(spreadsheetId: string, tabName: string): Promise<SheetRow[]> {
+export async function getTabContents(spreadsheetId: string, tabName: string): Promise<TabContents> {
   const sheets = getSheetsClient();
   const res = await withRetry(() =>
     sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: tabRange(tabName, "A1:O"),
+      range: tabRange(tabName, `A1:${MAX_COLUMN}`),
     })
   );
   await throttle();
   const all = res.data.values ?? [];
-  if (all.length === 0) return [];
+  if (all.length === 0) return { header: [], rows: [] };
 
   const header = (all[0] ?? []).map((v) => String(v ?? ""));
-  const totalClickIndex = SHEET_HEADERS.indexOf("Total Click");
-  const isLegacyLayout = !header.includes("Total Click");
-
-  return all.slice(1).map((row, idx) => {
-    let values = row.map((v) => String(v ?? ""));
-    if (isLegacyLayout) {
-      values = [...values.slice(0, totalClickIndex), "", ...values.slice(totalClickIndex)];
-    }
-    return { rowNumber: idx + 1, values };
-  });
+  const rows = all.slice(1).map((row, idx) => ({
+    rowNumber: idx + 1,
+    values: row.map((v) => String(v ?? "")),
+  }));
+  return { header, rows };
 }
 
 export async function getRow(spreadsheetId: string, tabName: string, rowNumber: number): Promise<string[] | null> {
@@ -422,13 +462,20 @@ export async function getRow(spreadsheetId: string, tabName: string, rowNumber: 
   return row ? row.values : null;
 }
 
-export async function updateRowValues(spreadsheetId: string, tabName: string, rowNumber: number, values: string[]): Promise<void> {
+export async function updateRowValues(
+  spreadsheetId: string,
+  tabName: string,
+  rowNumber: number,
+  values: string[],
+  width: number
+): Promise<void> {
   const sheets = getSheetsClient();
   const sheetRowIndex = rowNumber + 1; // account for header row
+  const lastCol = colLetter(Math.max(width, values.length));
   await withRetry(() =>
     sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: tabRange(tabName, `A${sheetRowIndex}:O${sheetRowIndex}`),
+      range: tabRange(tabName, `A${sheetRowIndex}:${lastCol}${sheetRowIndex}`),
       valueInputOption: "USER_ENTERED",
       requestBody: { values: [values] },
     })
@@ -464,14 +511,34 @@ export async function deleteRow(spreadsheetId: string, tabName: string, sheetId:
     values[0] = String(idx + 1);
     return values;
   });
+  const width = Math.max(...renumbered.map((r) => r.length), 1);
 
   await withRetry(() =>
     sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: tabRange(tabName, `A${DATA_START_ROW}:O${DATA_START_ROW + renumbered.length - 1}`),
+      range: tabRange(tabName, `A${DATA_START_ROW}:${colLetter(width)}${DATA_START_ROW + renumbered.length - 1}`),
       valueInputOption: "USER_ENTERED",
       requestBody: { values: renumbered },
     })
   );
   await throttle();
 }
+
+/**
+ * Makes sure a tab has a column for `field`, widening it if not. Returns the
+ * tab's header afterwards. Used by the edit path, where a user may set a
+ * field the tab's platform schema doesn't include yet.
+ */
+export async function ensureColumnForField(
+  spreadsheetId: string,
+  sheetId: number,
+  tabName: string,
+  platform: string,
+  field: DataField
+): Promise<string[]> {
+  const header = await migrateTabHeaderIfNeeded(spreadsheetId, sheetId, tabName, platform, [field]);
+  headerCache.set(`${spreadsheetId}|${tabName}`, header);
+  return header;
+}
+
+export { headerToFields };

@@ -11,13 +11,19 @@ import {
   normalizePlatformName,
   removeAllowedGroup,
   removeAuthorizedUser,
+  ALL_DATA_FIELDS,
+  DataField,
+  FIELD_SHORT_LABELS,
   MONTH_NAMES_EN,
+  cellOf,
+  columnIndexOfSystem,
+  numericCell,
 } from "../config";
 import { getSession, resetSessionFlow, setDefaultPlatform, setDefaultWebsite, updateSession } from "../services/memory";
-import { getMonthlyStatus, findSheetForCurrentMonth, listRows } from "../services/dataProcessor";
+import { FieldTotals, getMonthlyStatus, findSheetForCurrentMonth, listRows } from "../services/dataProcessor";
 import { getRow } from "../google/sheets";
 import { getRecentLogs, logCommand, logUnauthorized } from "../services/logger";
-import { EDITABLE_FIELDS, formatRowDisplay } from "./fields";
+import { editableFieldsForPlatform, formatRowDisplay } from "./fields";
 
 function username(ctx: Context): string | undefined {
   return ctx.from?.username;
@@ -57,12 +63,94 @@ function formatMoney(n: number): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// Formats a sheet-cell string as money when it holds a number; leaves
-// non-numeric/empty cells as-is (shown as "-").
-function formatMoneyCell(raw: string): string {
-  if (!raw) return "-";
-  const n = Number(raw);
-  return Number.isNaN(n) ? raw : formatMoney(n);
+// Money-valued fields render with 2 decimals; counts render as plain
+// integers. Averaged rather than summed where a sum would be meaningless.
+const MONEY_FIELDS: DataField[] = ["cpr", "totalSpent", "mainBudget"];
+const AVERAGED_FIELDS: DataField[] = ["cpr"];
+
+const STATUS_EMOJI: Partial<Record<DataField, string>> = {
+  totalMessage: "💬",
+  totalClick: "🖱",
+  cpr: "💰",
+  totalSpent: "💵",
+  mainBudget: "🏦",
+  impressions: "👁",
+  reach: "📈",
+  views: "▶️",
+  joined: "🙋",
+};
+
+/**
+ * Renders the metric lines of a /status block. A field only appears when
+ * some row actually reported it — with per-platform schemas, a blank column
+ * means "this platform doesn't report this", so printing it as 0 would be a
+ * lie. Averages divide by the contributing-row count, not the record count.
+ */
+function statusMetricLines(sums: FieldTotals, counts: FieldTotals): string[] {
+  const lines: string[] = [];
+  for (const field of ALL_DATA_FIELDS) {
+    const count = counts[field] ?? 0;
+    const sum = sums[field];
+    if (count === 0 || sum === undefined) continue;
+
+    const emoji = STATUS_EMOJI[field] ?? "•";
+    const label = FIELD_SHORT_LABELS[field];
+    if (AVERAGED_FIELDS.includes(field)) {
+      lines.push(`${emoji} ${label} เฉลี่ย: ${formatMoney(sum / count)} บาท (จาก ${count} รายการ)`);
+    } else if (MONEY_FIELDS.includes(field)) {
+      lines.push(`${emoji} ${label} รวม: ${formatMoney(sum)} บาท (จาก ${count} รายการ)`);
+    } else {
+      lines.push(`${emoji} ${label} รวม: ${formatInt(sum)} (จาก ${count} รายการ)`);
+    }
+  }
+  return lines;
+}
+
+function mergeTotals(entries: { sums: FieldTotals; counts: FieldTotals }[]): { sums: FieldTotals; counts: FieldTotals } {
+  const sums: FieldTotals = {};
+  const counts: FieldTotals = {};
+  for (const entry of entries) {
+    for (const field of ALL_DATA_FIELDS) {
+      if (entry.counts[field] === undefined) continue;
+      sums[field] = (sums[field] ?? 0) + (entry.sums[field] ?? 0);
+      counts[field] = (counts[field] ?? 0) + (entry.counts[field] ?? 0);
+    }
+  }
+  return { sums, counts };
+}
+
+// One compact line per row for /list, built from whatever that row's tab
+// actually has — no empty "CPR: -" padding for platforms without a CPR.
+const LIST_PREFERRED_FIELDS: DataField[] = [
+  "totalSpent",
+  "cpr",
+  "views",
+  "totalClick",
+  "totalMessage",
+  "reach",
+  "impressions",
+  "joined",
+  "mainBudget",
+];
+
+function formatListRow(header: string[], values: string[]): string {
+  const rowNumber = values[0] ?? "?";
+  const date = cellOf(header, values, "date") || "-";
+  const platformIndex = columnIndexOfSystem(header, "Platform");
+  const platform = platformIndex >= 0 ? values[platformIndex] ?? "" : "";
+
+  const parts: string[] = [];
+  for (const field of LIST_PREFERRED_FIELDS) {
+    if (parts.length >= 3) break;
+    const raw = cellOf(header, values, field);
+    const num = numericCell(raw);
+    if (num === null) continue;
+    const rendered = MONEY_FIELDS.includes(field) ? `${formatMoney(num)}฿` : formatInt(num);
+    parts.push(`${FIELD_SHORT_LABELS[field]}: ${rendered}`);
+  }
+
+  const head = [`#${rowNumber}`, date, platform].filter((p) => p).join(" | ");
+  return parts.length > 0 ? `${head} | ${parts.join(" | ")}` : head;
 }
 
 export function registerCommands(bot: Bot): void {
@@ -135,32 +223,19 @@ export function registerCommands(bot: Bot): void {
         const lines = [
           `📊 สถานะเว็บ ${s.website} - ${monthLabel}`,
           `📝 จำนวนรายการ: ${formatInt(s.recordCount)} รายการ`,
-          `💬 Total Message รวม: ${formatInt(s.totalMessageSum)}`,
-          `👁 Impressions รวม: ${formatInt(s.impressionsSum)}`,
-          `📈 Reach รวม: ${formatInt(s.reachSum)}`,
-          `💰 CPR เฉลี่ย: ${formatMoney(s.cprAvg)} บาท`,
-          `💵 Total Spent รวม: ${formatMoney(s.totalSpentSum)} บาท`,
+          ...statusMetricLines(s.sums, s.counts),
         ];
         await ctx.reply(lines.join("\n"));
       }
 
       const totalRecords = status.reduce((sum, s) => sum + s.recordCount, 0);
-      const totalMessageSum = status.reduce((sum, s) => sum + s.totalMessageSum, 0);
-      const totalSpentSum = status.reduce((sum, s) => sum + s.totalSpentSum, 0);
-      const impressionsSum = status.reduce((sum, s) => sum + s.impressionsSum, 0);
-      const reachSum = status.reduce((sum, s) => sum + s.reachSum, 0);
-      const cprSum = status.reduce((sum, s) => sum + s.cprAvg * s.recordCount, 0);
-      const overallCprAvg = totalRecords > 0 ? cprSum / totalRecords : 0;
+      const overall = mergeTotals(status);
 
       const summaryLines = [
         `📊 สรุปภาพรวมทุกเว็บไซต์ - ${monthLabel}`,
         `🌐 จำนวนเว็บไซต์ที่มีข้อมูล: ${status.length}`,
         `📝 จำนวนรายการรวม: ${formatInt(totalRecords)} รายการ`,
-        `💬 Total Message รวม: ${formatInt(totalMessageSum)}`,
-        `👁 Impressions รวม: ${formatInt(impressionsSum)}`,
-        `📈 Reach รวม: ${formatInt(reachSum)}`,
-        `💰 CPR เฉลี่ยรวม: ${formatMoney(overallCprAvg)} บาท`,
-        `💵 Total Spent รวม: ${formatMoney(totalSpentSum)} บาท`,
+        ...statusMetricLines(overall.sums, overall.counts),
       ];
       await ctx.reply(summaryLines.join("\n"));
     } catch (err) {
@@ -240,15 +315,16 @@ export function registerCommands(bot: Bot): void {
     });
 
     const keyboard = new InlineKeyboard();
-    EDITABLE_FIELDS.forEach((f, idx) => {
-      keyboard.text(f.label, `editfield:${idx}`);
+    editableFieldsForPlatform(platform).forEach((f, idx) => {
+      keyboard.text(f.label, `editfield:${f.key}`);
       if (idx % 2 === 1) keyboard.row();
     });
     keyboard.row().text("❌ ยกเลิก", "editfield:cancel");
 
-    await ctx.reply(`📝 ข้อมูล row #${rowNumber} ปัจจุบัน:\n\n${formatRowDisplay(row)}\n\nเลือก field ที่ต้องการแก้ไข:`, {
-      reply_markup: keyboard,
-    });
+    await ctx.reply(
+      `📝 ข้อมูล row #${rowNumber} ปัจจุบัน:\n\n${formatRowDisplay(sheetInfo.header, row)}\n\nเลือก field ที่ต้องการแก้ไข:`,
+      { reply_markup: keyboard }
+    );
     logCommand(ctx.from!.id, username(ctx), `/edit ${rowNumber}`);
   });
 
@@ -282,7 +358,7 @@ export function registerCommands(bot: Bot): void {
       return;
     }
 
-    const lines = result.rows.slice(0, 30).map((r) => `#${r[0]} | ${r[1]} | ${r[2]} | Spent: ${formatMoneyCell(r[6])}฿ | CPR: ${formatMoneyCell(r[5])}`);
+    const lines = result.rows.slice(0, 30).map((r) => formatListRow(r.header, r.values));
     const header = `📋 ${website} - ${month}${platformFilter ? ` (${platformFilter})` : ""} (${result.rows.length} รายการ)`;
     const suffix = result.rows.length > 30 ? "\n\n(แสดง 30 รายการแรก)" : "";
     await ctx.reply(`${header}\n\n${lines.join("\n")}${suffix}`);
@@ -335,7 +411,7 @@ export function registerCommands(bot: Bot): void {
     });
 
     const keyboard = new InlineKeyboard().text("✅ ยืนยันลบ", "delete:confirm1").text("❌ ยกเลิก", "delete:cancel");
-    await ctx.reply(`⚠️ ยืนยันการลบ row #${rowNumber}?\n\n${formatRowDisplay(row)}`, { reply_markup: keyboard });
+    await ctx.reply(`⚠️ ยืนยันการลบ row #${rowNumber}?\n\n${formatRowDisplay(sheetInfo.header, row)}`, { reply_markup: keyboard });
     logCommand(ctx.from!.id, username(ctx), `/delete ${rowNumber}`);
   });
 

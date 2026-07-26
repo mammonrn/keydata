@@ -1,6 +1,7 @@
 import "dotenv/config";
 import fs from "fs";
 import path from "path";
+import { ALL_DATA_FIELDS, buildHeader } from "./schema";
 
 const DATA_DIR = path.join(__dirname, "..", "..", "data");
 const USERS_FILE = path.join(DATA_DIR, "authorized-users.json");
@@ -149,8 +150,9 @@ const DEFAULT_ALIASES: AliasMap = {
 };
 
 const DEFAULT_PLATFORM_ALIASES: AliasMap = {
-  Facebook: ["facebook", "fb", "FB"],
-  TikTok: ["tiktok", "Tiktok", "TIKTOK", "tik tok"],
+  Facebook: ["facebook", "fb", "FB", "Facebook Ads", "facebook ads"],
+  TikTok: ["tiktok", "Tiktok", "TIKTOK", "tik tok", "TikTok Ads", "tiktok ads"],
+  Telegram: ["telegram", "TELEGRAM", "tg", "TG", "Telegram Ads", "telegram ads"],
   Google: ["google", "Google Ads", "google ads"],
   Instagram: ["instagram", "ig", "IG"],
   LINE: ["line", "Line"],
@@ -333,22 +335,11 @@ export const MONTH_NAMES_EN = [
   "December",
 ];
 
-export const SHEET_HEADERS = [
-  "Row",
-  "Date",
-  "Platform",
-  "Total Message",
-  "Total Click",
-  "CPR (฿)",
-  "Total Spent (฿)",
-  "Impressions",
-  "Reach",
-  "Target Audience",
-  "Ads Name",
-  "Location",
-  "Photo Link",
-  "Recorded By",
-  "Recorded At",
-];
+export * from "./schema";
+
+// The widest layout the system can produce — every known field. Used as the
+// fallback header for platforms with no explicit schema; per-platform layouts
+// come from schemaForPlatform()/resolveTargetHeader() instead.
+export const SHEET_HEADERS = buildHeader(ALL_DATA_FIELDS);
 
 export const DATA_DIR_PATH = DATA_DIR;

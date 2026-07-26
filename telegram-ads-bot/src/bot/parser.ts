@@ -1,9 +1,35 @@
 import { AdsData, REQUIRED_FIELDS, RequiredField } from "../types";
 
-type NumericField = "totalMessage" | "totalClick" | "cpr" | "totalSpent" | "impressions" | "reach";
-type TextField = "date" | "targetAudience" | "adsName" | "location" | "website" | "platform";
+type NumericField =
+  | "totalMessage"
+  | "totalClick"
+  | "cpr"
+  | "totalSpent"
+  | "impressions"
+  | "reach"
+  | "views"
+  | "mainBudget"
+  | "joined";
+type TextField =
+  | "date"
+  | "targetAudience"
+  | "adsName"
+  | "location"
+  | "runningCampaign"
+  | "website"
+  | "platform";
 
-const NUMERIC_FIELDS: NumericField[] = ["totalMessage", "totalClick", "cpr", "totalSpent", "impressions", "reach"];
+const NUMERIC_FIELDS: NumericField[] = [
+  "totalMessage",
+  "totalClick",
+  "cpr",
+  "totalSpent",
+  "impressions",
+  "reach",
+  "views",
+  "mainBudget",
+  "joined",
+];
 
 const FIELD_ALIASES: Record<string, TextField | NumericField> = {
   date: "date",
@@ -11,20 +37,47 @@ const FIELD_ALIASES: Record<string, TextField | NumericField> = {
   total: "totalMessage",
   messages: "totalMessage",
   message: "totalMessage",
+  // TikTok/Telegram report a bare "Click"/"Clicks"; that is the same quantity
+  // Facebook records as "Total Click", so it maps to the existing field
+  // rather than adding a second clicks column that means the same thing.
   totalclick: "totalClick",
   click: "totalClick",
   clicks: "totalClick",
   "จำนวนคลิก": "totalClick",
   "คลิก": "totalClick",
+  "ยอดคลิก": "totalClick",
   cpr: "cpr",
   costperresult: "cpr",
+  // "Spent budget" (TikTok/Telegram) is the same money-actually-spent value
+  // Facebook calls "Total Spent" — one shared field, several spellings.
   totalspent: "totalSpent",
+  spentbudget: "totalSpent",
   spent: "totalSpent",
   spend: "totalSpent",
   budget: "totalSpent",
+  "ยอดใช้จ่าย": "totalSpent",
+  "งบที่ใช้": "totalSpent",
   impressions: "impressions",
   impression: "impressions",
   reach: "reach",
+  // Views counts people who actually watched; Impressions counts times the
+  // ad was served. Deliberately separate fields.
+  views: "views",
+  view: "views",
+  "วิว": "views",
+  "ยอดวิว": "views",
+  "จำนวนวิว": "views",
+  // Main Budget is the allocated budget; it coexists with Spent Budget in a
+  // Telegram report, so it cannot be folded into totalSpent.
+  mainbudget: "mainBudget",
+  "งบหลัก": "mainBudget",
+  "งบทั้งหมด": "mainBudget",
+  runningcampaign: "runningCampaign",
+  "แคมเปญ": "runningCampaign",
+  "แคมเปญที่รัน": "runningCampaign",
+  joined: "joined",
+  "เข้าร่วม": "joined",
+  "ยอดเข้าร่วม": "joined",
   targetaudience: "targetAudience",
   audience: "targetAudience",
   target: "targetAudience",
@@ -330,9 +383,13 @@ export function formatParsedSummary(data: Partial<AdsData>): string {
   if (data.totalMessage !== undefined) lines.push(`💬 Total Message: ${data.totalMessage}`);
   if (data.totalClick !== undefined) lines.push(`🖱 Total Click: ${data.totalClick}`);
   if (data.cpr !== undefined) lines.push(`💰 CPR: ${data.cpr} บาท`);
+  if (data.mainBudget !== undefined) lines.push(`🏦 Main Budget: ${data.mainBudget} บาท`);
   if (data.totalSpent !== undefined) lines.push(`💵 Total Spent: ${data.totalSpent} บาท`);
   if (data.impressions !== undefined) lines.push(`👁 Impressions: ${data.impressions}`);
   if (data.reach !== undefined) lines.push(`📊 Reach: ${data.reach}`);
+  if (data.views !== undefined) lines.push(`▶️ Views: ${data.views}`);
+  if (data.joined !== undefined) lines.push(`🙋 Joined: ${data.joined}`);
+  if (data.runningCampaign) lines.push(`🚀 Running Campaign: ${data.runningCampaign}`);
   if (data.targetAudience) lines.push(`🎯 Target Audience: ${data.targetAudience}`);
   if (data.adsName) lines.push(`📢 Ads Name: ${data.adsName}`);
   if (data.location) lines.push(`📍 Location: ${data.location}`);

@@ -1,5 +1,20 @@
 import { AdsData, PendingEdit } from "../types";
-import { MONTH_NAMES_EN, config, isCanonicalPlatform, isSuperAdmin, normalizePlatformName, normalizeWebsiteName, registerPlatformIfNew } from "../config";
+import {
+  ALL_DATA_FIELDS,
+  DataField,
+  MONTH_NAMES_EN,
+  columnIndexOfField,
+  columnIndexOfSystem,
+  config,
+  dataFieldsPresent,
+  headerToFields,
+  isCanonicalPlatform,
+  isSuperAdmin,
+  normalizePlatformName,
+  normalizeWebsiteName,
+  numericCell,
+  registerPlatformIfNew,
+} from "../config";
 import { clearDriveCaches, ensureFolderStructure, isKnownWebsite, listChildFolders, moveFileToFolder, uploadPhoto } from "../google/drive";
 import {
   appendRawRow,
@@ -7,11 +22,13 @@ import {
   buildSheetFileName,
   clearSheetCaches,
   deleteRow,
+  ensureColumnForField,
   ensureSpreadsheet,
   findSpreadsheetIdForWebsiteMonth,
   findTab,
-  getAllRowsNormalized,
   getRow,
+  getTabContents,
+  getTabHeader,
   listSheetTabs,
   sanitizeTabName,
   updateRowValues,
@@ -92,7 +109,18 @@ export async function saveAdsData(
     const month = MONTH_NAMES_EN[dateObj.getMonth()];
 
     const refs = await ensureFolderStructure(data.website, dateObj, data.platform, actor);
-    const sheet = await ensureSpreadsheet(refs.monthFolderId, data.website, month, year, data.platform, actor);
+    // The tab is widened to fit whatever this record actually carries, so a
+    // field outside the platform's default schema gains a real column
+    // instead of being silently dropped.
+    const sheet = await ensureSpreadsheet(
+      refs.monthFolderId,
+      data.website,
+      month,
+      year,
+      data.platform,
+      actor,
+      dataFieldsPresent(data as unknown as Record<string, unknown>)
+    );
 
     let photoLink: string | undefined;
     if (photos.length > 0) {
@@ -150,6 +178,7 @@ export interface CurrentMonthSheet {
   spreadsheetId: string;
   sheetId: number;
   tabName: string;
+  header: string[];
   month: string;
   year: string;
 }
@@ -167,33 +196,64 @@ export async function findSheetForCurrentMonth(website: string, platform: string
   if (!spreadsheetId) return null;
   const tab = await findTab(spreadsheetId, sanitizeTabName(platform));
   if (!tab) return null;
-  return { spreadsheetId, sheetId: tab.sheetId, tabName: tab.title, month, year };
+  const header = await getTabHeader(spreadsheetId, tab.title);
+  return { spreadsheetId, sheetId: tab.sheetId, tabName: tab.title, header, month, year };
 }
 
+export interface EditRowResult {
+  before: string;
+  after: string;
+  header: string[];
+  beforeRow: string[];
+  afterRow: string[];
+}
+
+/**
+ * Writes a single field of a stored row. The column is resolved from the
+ * tab's own header rather than a fixed index, since each platform tab has
+ * its own layout; if the tab has no column for the field yet (editing a
+ * field outside that platform's default schema) the tab is widened first.
+ */
 export async function editRowField(
   spreadsheetId: string,
+  sheetId: number,
   tabName: string,
+  platform: string,
   rowNumber: number,
-  fieldIndex: number,
+  field: DataField,
   newValue: string,
   actor: Actor,
   website: string
-): Promise<{ before: string[]; after: string[] } | null> {
+): Promise<EditRowResult | null> {
+  let header = await getTabHeader(spreadsheetId, tabName);
+  let columnIndex = columnIndexOfField(header, field);
+  if (columnIndex < 0) {
+    header = await ensureColumnForField(spreadsheetId, sheetId, tabName, platform, field);
+    columnIndex = columnIndexOfField(header, field);
+    if (columnIndex < 0) {
+      throw new Error(`ไม่สามารถเพิ่มคอลัมน์สำหรับ '${field}' ใน tab ${tabName} ได้`);
+    }
+  }
+
   const row = await getRow(spreadsheetId, tabName, rowNumber);
   if (!row) return null;
-  const before = [...row];
-  const after = [...row];
-  after[fieldIndex] = newValue;
-  await updateRowValues(spreadsheetId, tabName, rowNumber, after);
+
+  const beforeRow = [...row];
+  const afterRow = [...row];
+  while (afterRow.length < header.length) afterRow.push("");
+  const before = beforeRow[columnIndex] ?? "";
+  afterRow[columnIndex] = newValue;
+
+  await updateRowValues(spreadsheetId, tabName, rowNumber, afterRow, header.length);
   logEdited(
     actor.userId,
     actor.username,
     website,
-    `Edited row #${rowNumber} [${tabName}]: "${before[fieldIndex]}" -> "${newValue}"`,
+    `Edited row #${rowNumber} [${tabName}] ${field}: "${before}" -> "${newValue}"`,
     spreadsheetId,
     rowNumber
   );
-  return { before, after };
+  return { before, after: newValue, header, beforeRow, afterRow };
 }
 
 export async function deleteRowWithLog(
@@ -210,8 +270,6 @@ export async function deleteRowWithLog(
   logDeleted(actor.userId, actor.username, website, `Deleted row #${rowNumber} [${tabName}]: ${JSON.stringify(snapshot)}`, spreadsheetId, rowNumber);
   return snapshot;
 }
-
-const PHOTO_LINK_COLUMN = 12;
 
 function extractDriveFileIds(photoLinkCell: string): string[] {
   const ids: string[] = [];
@@ -249,21 +307,38 @@ export async function moveRowToWebsite(edit: PendingEdit, newWebsiteRaw: string,
     throw new Error(`ไม่อนุญาตให้สร้างเว็บไซต์ใหม่ '${newWebsite}' — เฉพาะ Admin เท่านั้น`);
   }
 
+  const srcHeader = await getTabHeader(edit.spreadsheetId, edit.tabName);
   const row = await getRow(edit.spreadsheetId, edit.tabName, edit.rowNumber);
   if (!row) return null;
 
-  const rowPlatform = row[2] || edit.tabName;
+  const platformIndex = columnIndexOfSystem(srcHeader, "Platform");
+  const rowPlatform = (platformIndex >= 0 ? row[platformIndex] : "") || edit.tabName;
   const monthIndex = MONTH_NAMES_EN.findIndex((m) => m.toLowerCase() === edit.month.toLowerCase());
   const monthDate = new Date(Number(edit.year), monthIndex >= 0 ? monthIndex : 0, 1);
 
   const destRefs = await ensureFolderStructure(newWebsite, monthDate, rowPlatform, actor);
-  const destSheet = await ensureSpreadsheet(destRefs.monthFolderId, newWebsite, edit.month, edit.year, rowPlatform, actor);
+  // The destination tab must be wide enough for every field the source row
+  // actually holds, or the move would quietly drop columns the destination
+  // platform's schema doesn't include.
+  const carriedFields = headerToFields(srcHeader).filter(
+    (f) => (row[columnIndexOfField(srcHeader, f)] ?? "").trim().length > 0
+  );
+  const destSheet = await ensureSpreadsheet(
+    destRefs.monthFolderId,
+    newWebsite,
+    edit.month,
+    edit.year,
+    rowPlatform,
+    actor,
+    carriedFields
+  );
 
-  const newRowNumber = await appendRawRow(destSheet, row);
+  const newRowNumber = await appendRawRow(destSheet, srcHeader, row);
   await deleteRow(edit.spreadsheetId, edit.tabName, edit.sheetId, edit.rowNumber);
 
   let photosMoved = 0;
-  const photoIds = extractDriveFileIds(row[PHOTO_LINK_COLUMN] ?? "");
+  const photoLinkIndex = columnIndexOfSystem(srcHeader, "Photo Link");
+  const photoIds = extractDriveFileIds(photoLinkIndex >= 0 ? row[photoLinkIndex] ?? "" : "");
   for (const fileId of photoIds) {
     await moveFileToFolder(fileId, destRefs.photosFolderId);
     photosMoved++;
@@ -282,21 +357,32 @@ export async function moveRowToWebsite(edit: PendingEdit, newWebsiteRaw: string,
   return { oldWebsite, newWebsite, newRowNumber, destFileName, photosMoved };
 }
 
+export type FieldTotals = Partial<Record<DataField, number>>;
+
 export interface MonthlyStatusEntry {
   website: string;
   recordCount: number;
-  totalMessageSum: number;
-  cprAvg: number;
-  totalSpentSum: number;
-  impressionsSum: number;
-  reachSum: number;
+  /** Sum of each field, over the rows that actually carry that field. */
+  sums: FieldTotals;
+  /** How many rows contributed to each sum — the correct divisor for averages. */
+  counts: FieldTotals;
 }
 
-function toNumber(raw: string | undefined): number {
-  const num = Number(raw);
-  return Number.isNaN(num) ? 0 : num;
+function accumulate(target: FieldTotals, counts: FieldTotals, field: DataField, value: number): void {
+  target[field] = (target[field] ?? 0) + value;
+  counts[field] = (counts[field] ?? 0) + 1;
 }
 
+/**
+ * Monthly totals per website, aggregated across every platform tab.
+ *
+ * Platforms report different metrics, so a blank cell means "this platform
+ * doesn't report this", not "zero". Each field therefore carries its own
+ * contributing-row count: sums skip blanks entirely, and an average like CPR
+ * divides by the number of rows that actually had a CPR rather than by the
+ * total record count (which used to drag the average toward zero as soon as
+ * any non-Facebook data existed).
+ */
 export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
   const now = new Date();
   const month = MONTH_NAMES_EN[now.getMonth()];
@@ -309,44 +395,36 @@ export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
     const spreadsheetId = await findSpreadsheetIdForWebsiteMonth(folder.name, month, year, now);
     if (!spreadsheetId) continue;
 
-    // Sum across every tab in the file, including the legacy "Data" tab —
-    // reads must reflect everything actually stored, whichever code version
-    // wrote it. (Writes still never touch the legacy tab.) Normalized reads
-    // keep column positions correct even if a tab still has the old
-    // pre-Total-Click header.
+    // Read every tab in the file, including the legacy "Data" tab — reads
+    // must reflect everything actually stored, whichever code version wrote
+    // it. (Writes still never touch the legacy tab.) Each tab is interpreted
+    // against its own header, so differing layouts mix safely.
     const tabs = await listSheetTabs(spreadsheetId);
 
     let recordCount = 0;
-    let totalMessageSum = 0;
-    let cprSum = 0;
-    let totalSpentSum = 0;
-    let impressionsSum = 0;
-    let reachSum = 0;
+    const sums: FieldTotals = {};
+    const counts: FieldTotals = {};
 
     for (const tab of tabs) {
-      const rows = await getAllRowsNormalized(spreadsheetId, tab.title);
+      const { header, rows } = await getTabContents(spreadsheetId, tab.title);
+      if (header.length === 0) continue;
       recordCount += rows.length;
+
+      const indices = ALL_DATA_FIELDS.map((field) => [field, columnIndexOfField(header, field)] as const).filter(
+        ([, index]) => index >= 0
+      );
+
       for (const row of rows) {
-        // row.values indices: [1]=Date [2]=Platform [3]=TotalMessage [4]=TotalClick [5]=CPR [6]=TotalSpent [7]=Impressions [8]=Reach
-        totalMessageSum += toNumber(row.values[3]);
-        cprSum += toNumber(row.values[5]);
-        totalSpentSum += toNumber(row.values[6]);
-        impressionsSum += toNumber(row.values[7]);
-        reachSum += toNumber(row.values[8]);
+        for (const [field, index] of indices) {
+          const num = numericCell(row.values[index] ?? "");
+          if (num !== null) accumulate(sums, counts, field, num);
+        }
       }
     }
 
     if (recordCount === 0 && tabs.length === 0) continue;
 
-    results.push({
-      website: folder.name,
-      recordCount,
-      totalMessageSum,
-      cprAvg: recordCount > 0 ? cprSum / recordCount : 0,
-      totalSpentSum,
-      impressionsSum,
-      reachSum,
-    });
+    results.push({ website: folder.name, recordCount, sums, counts });
   }
 
   return results;
@@ -359,12 +437,17 @@ export async function getMonthlyStatus(): Promise<MonthlyStatusEntry[]> {
  * actually stored. Each row carries its Platform column, so a combined
  * listing stays unambiguous.
  */
+export interface ListedRow {
+  header: string[];
+  values: string[];
+}
+
 export async function listRows(
   website: string,
   month: string,
   year: string,
   platformFilter?: string
-): Promise<{ spreadsheetId: string; rows: string[][] } | null> {
+): Promise<{ spreadsheetId: string; rows: ListedRow[] } | null> {
   const monthIndex = MONTH_NAMES_EN.findIndex((m) => m.toLowerCase() === month.toLowerCase());
   const dateForLookup = monthIndex >= 0 ? new Date(Number(year), monthIndex, 1) : new Date();
   const spreadsheetId = await findSpreadsheetIdForWebsiteMonth(website, month, year, dateForLookup);
@@ -373,7 +456,10 @@ export async function listRows(
   const allTabs = await listSheetTabs(spreadsheetId);
   const filter = platformFilter?.toLowerCase();
 
-  const values: string[][] = [];
+  // Rows travel with the header of the tab they came from: a combined
+  // listing can span platforms whose tabs have different column layouts, so
+  // there is no shared index the caller could read cells by.
+  const listed: ListedRow[] = [];
   for (const tab of allTabs) {
     const tabMatches = !filter || tab.title.toLowerCase().includes(filter);
     // The legacy "Data" tab mixes platforms in one table, so a platform
@@ -381,12 +467,16 @@ export async function listRows(
     const isMixedLegacyTab = tab.title === "Data";
     if (!tabMatches && !isMixedLegacyTab) continue;
 
-    const rows = await getAllRowsNormalized(spreadsheetId, tab.title);
+    const { header, rows } = await getTabContents(spreadsheetId, tab.title);
+    if (header.length === 0) continue;
+    const platformIndex = columnIndexOfSystem(header, "Platform");
+
     for (const r of rows) {
-      if (tabMatches || (r.values[2] ?? "").toLowerCase().includes(filter!)) {
-        values.push(r.values);
+      const rowPlatform = platformIndex >= 0 ? (r.values[platformIndex] ?? "").toLowerCase() : "";
+      if (tabMatches || rowPlatform.includes(filter!)) {
+        listed.push({ header, values: r.values });
       }
     }
   }
-  return { spreadsheetId, rows: values };
+  return { spreadsheetId, rows: listed };
 }

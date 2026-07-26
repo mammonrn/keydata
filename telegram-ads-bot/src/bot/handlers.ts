@@ -1,10 +1,21 @@
 import path from "path";
 import { Bot, Context, InlineKeyboard } from "grammy";
-import { config, isAllowedGroup, isAuthorizedUser, isCanonicalPlatform, isSuperAdmin, listCanonicalPlatforms, normalizePlatformName, normalizeWebsiteName } from "../config";
+import {
+  DataField,
+  config,
+  hasAnyMetricField,
+  isAllowedGroup,
+  isAuthorizedUser,
+  isCanonicalPlatform,
+  isSuperAdmin,
+  listCanonicalPlatforms,
+  normalizePlatformName,
+  normalizeWebsiteName,
+} from "../config";
 import { AdsData, FIELD_LABELS_TH, REQUIRED_FIELDS, TOTAL_MESSAGE_OR_CLICK_FIELD, UserSession } from "../types";
 import { getSession, resetSessionFlow, updateSession } from "../services/memory";
 import { formatParsedSummary, parseAdsMessage, parseFieldAnswer, parseTotalMessageOrClickAnswer } from "./parser";
-import { EDITABLE_FIELDS } from "./fields";
+import { editableFieldsForPlatform, findEditableField } from "./fields";
 import { deleteRowWithLog, editRowField, moveRowToWebsite, PhotoInput, saveAdsData } from "../services/dataProcessor";
 import { isKnownWebsite, listKnownWebsites } from "../google/drive";
 import { logError, logUnauthorized } from "../services/logger";
@@ -15,18 +26,22 @@ const FALLBACK_WEBSITES = ["SH666", "SH999", "UB89", "88F"];
 
 const REQUIRED_FIELD_SET: readonly string[] = REQUIRED_FIELDS;
 
-function isEmptyNumber(v: number | undefined | null): boolean {
-  return v === undefined || v === null;
-}
+const NO_DATA_MESSAGE =
+  "❌ ไม่พบข้อมูลโฆษณาในข้อความ กรุณาตรวจสอบรูปแบบข้อความอีกครั้ง\n\n" +
+  "ตัวอย่าง (ใช้ : หรือ - คั่นก็ได้):\nTotal Spent - 1780.63\nViews - 13543\nClicks - 240";
 
+/**
+ * Only the fields that decide *where* a row is filed are still mandatory.
+ * Each platform reports a different set of numbers, so demanding CPR /
+ * Impressions / Reach / Total Message from every message made the flow
+ * unusable for TikTok and Telegram reports. Whether a record carries any
+ * actual metric is checked separately by hasAnyMetricField().
+ */
 function missingFieldsOf(data: Partial<AdsData>): string[] {
   const missing: string[] = [];
   if (!data.date) missing.push("date");
-  if (isEmptyNumber(data.totalMessage) && isEmptyNumber(data.totalClick)) {
-    missing.push(TOTAL_MESSAGE_OR_CLICK_FIELD);
-  }
-  for (const f of ["cpr", "totalSpent", "reach", "website", "platform"] as const) {
-    const value = (data as any)[f];
+  for (const f of ["website", "platform"] as const) {
+    const value = data[f];
     if (value === undefined || value === null || value === "") missing.push(f);
   }
   return missing;
@@ -230,6 +245,14 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
     return;
   }
 
+  // Something was recognized, but nothing that counts as ad data (e.g. only
+  // a stray date). Starting the Q&A here would walk the user all the way to
+  // a confirmation screen for an empty row, so say so instead.
+  if (!hasAnyMetricField(parsed.data as unknown as Record<string, unknown>)) {
+    await ctx.reply(NO_DATA_MESSAGE);
+    return;
+  }
+
   const data: Partial<AdsData> = { ...parsed.data };
   if (data.website) {
     data.website = normalizeWebsiteName(data.website);
@@ -363,7 +386,7 @@ async function handleEditingFieldValue(ctx: Context, userId: number, text: strin
     resetSessionFlow(userId);
     return;
   }
-  const fieldDef = EDITABLE_FIELDS.find((f) => String(f.index) === pendingEdit.field);
+  const fieldDef = findEditableField(pendingEdit.field);
   if (!fieldDef) {
     resetSessionFlow(userId);
     return;
@@ -426,13 +449,23 @@ async function handleEditingFieldValue(ctx: Context, userId: number, text: strin
   const actor = { userId, username: ctx.from?.username };
   try {
     const website = pendingEdit.sheetName.split("_")[0];
-    const result2 = await editRowField(pendingEdit.spreadsheetId, pendingEdit.tabName, pendingEdit.rowNumber, fieldDef.index, rawValue, actor, website);
+    const result2 = await editRowField(
+      pendingEdit.spreadsheetId,
+      pendingEdit.sheetId,
+      pendingEdit.tabName,
+      pendingEdit.tabName,
+      pendingEdit.rowNumber,
+      fieldDef.key as DataField,
+      rawValue,
+      actor,
+      website
+    );
     resetSessionFlow(userId);
     if (!result2) {
       await ctx.reply(`❌ ไม่พบ row #${pendingEdit.rowNumber}`);
       return;
     }
-    await ctx.reply(`✅ แก้ไขสำเร็จ\n\nก่อนหน้า: ${result2.before[fieldDef.index]}\nปัจจุบัน: ${result2.after[fieldDef.index]}`);
+    await ctx.reply(`✅ แก้ไขสำเร็จ\n\nก่อนหน้า: ${result2.before || "-"}\nปัจจุบัน: ${result2.after || "-"}`);
   } catch (err) {
     logError(userId, ctx.from?.username, String(err));
     await ctx.reply(`❌ เกิดข้อผิดพลาดในการแก้ไข: ${(err as Error).message}`);
@@ -539,6 +572,12 @@ async function performConfirm(ctx: Context, userId: number): Promise<void> {
     await askForMissingField(ctx, userId, missing[0]);
     return;
   }
+  // Safety net: metrics are all optional individually, but a row with none
+  // of them is an empty record.
+  if (!hasAnyMetricField(data as unknown as Record<string, unknown>)) {
+    await ctx.reply(NO_DATA_MESSAGE);
+    return;
+  }
 
   try {
     const fileIds = session.pendingPhotoFileIds ?? [];
@@ -558,9 +597,11 @@ async function performConfirm(ctx: Context, userId: number): Promise<void> {
   }
 }
 
-function pendingEditKeyboard(): InlineKeyboard {
+// Scoped to the platform's schema so a TikTok record isn't offered CPR /
+// Impressions / Reach buttons for columns its tab doesn't have.
+function pendingEditKeyboard(platform: string | undefined): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  EDITABLE_FIELDS.forEach((f, idx) => {
+  editableFieldsForPlatform(platform).forEach((f, idx) => {
     keyboard.text(f.label, `pendingedit:${f.key}`);
     if (idx % 2 === 1) keyboard.row();
   });
@@ -591,7 +632,7 @@ export function registerHandlers(bot: Bot): void {
         await ctx.reply("ไม่มีข้อมูลที่รอการแก้ไข");
         return;
       }
-      await ctx.reply("เลือก field ที่ต้องการแก้ไข:", { reply_markup: pendingEditKeyboard() });
+      await ctx.reply("เลือก field ที่ต้องการแก้ไข:", { reply_markup: pendingEditKeyboard(session.pendingData?.platform) });
       return;
     }
 
@@ -606,7 +647,7 @@ export function registerHandlers(bot: Bot): void {
       const session = getSession(userId);
 
       // Post-save /edit flow: route picked website to the edit handler
-      if (session.step === "editing_field_value" && session.pendingEdit?.field === "-1") {
+      if (session.step === "editing_field_value" && session.pendingEdit?.field === "website") {
         await handleEditingFieldValue(ctx, userId, pickedName);
         return;
       }
@@ -637,7 +678,7 @@ export function registerHandlers(bot: Bot): void {
 
       // Post-save /edit flow: keep step as editing_field_value so the typed
       // answer routes to handleEditingFieldValue.
-      if (session.step === "editing_field_value" && session.pendingEdit?.field === "-1") {
+      if (session.step === "editing_field_value" && session.pendingEdit?.field === "website") {
         await ctx.reply("✏️ กรุณาพิมพ์ชื่อเว็บไซต์ใหม่ที่ต้องการเพิ่ม:");
         return;
       }
@@ -656,7 +697,7 @@ export function registerHandlers(bot: Bot): void {
       const pickedName = data.slice("platformpick:".length);
       const session = getSession(userId);
 
-      if (session.step === "editing_field_value" && session.pendingEdit?.field === "2") {
+      if (session.step === "editing_field_value" && session.pendingEdit?.field === "platform") {
         await handleEditingFieldValue(ctx, userId, pickedName);
         return;
       }
@@ -684,7 +725,7 @@ export function registerHandlers(bot: Bot): void {
 
       const session = getSession(userId);
 
-      if (session.step === "editing_field_value" && session.pendingEdit?.field === "2") {
+      if (session.step === "editing_field_value" && session.pendingEdit?.field === "platform") {
         await ctx.reply("✏️ กรุณาพิมพ์ชื่อ Platform ใหม่ที่ต้องการเพิ่ม:");
         return;
       }
@@ -765,7 +806,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       updateSession(userId, { step: "awaiting_confirmation", currentMissingField: undefined });
-      await ctx.reply("เลือก field ที่ต้องการแก้ไข:", { reply_markup: pendingEditKeyboard() });
+      await ctx.reply("เลือก field ที่ต้องการแก้ไข:", { reply_markup: pendingEditKeyboard(session.pendingData?.platform) });
       return;
     }
 
@@ -776,13 +817,13 @@ export function registerHandlers(bot: Bot): void {
     }
 
     if (data.startsWith("editfield:")) {
-      const value = data.split(":")[1];
+      const value = data.slice("editfield:".length);
       if (value === "cancel") {
         resetSessionFlow(userId);
         await ctx.reply("ยกเลิกแล้ว");
         return;
       }
-      const fieldDef = EDITABLE_FIELDS[Number(value)];
+      const fieldDef = findEditableField(value);
       const session = getSession(userId);
       if (!fieldDef || !session.pendingEdit) {
         resetSessionFlow(userId);
@@ -791,7 +832,7 @@ export function registerHandlers(bot: Bot): void {
       }
       updateSession(userId, {
         step: "editing_field_value",
-        pendingEdit: { ...session.pendingEdit, field: String(fieldDef.index) },
+        pendingEdit: { ...session.pendingEdit, field: fieldDef.key },
       });
       if (fieldDef.key === "website") {
         const keyboard = await websitePickerKeyboard(userId);
