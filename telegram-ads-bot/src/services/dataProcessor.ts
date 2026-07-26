@@ -464,7 +464,7 @@ export async function listRows(
     const tabMatches = !filter || tab.title.toLowerCase().includes(filter);
     // The legacy "Data" tab mixes platforms in one table, so a platform
     // filter is applied to its rows' Platform column instead of the tab name.
-    const isMixedLegacyTab = tab.title === "Data";
+    const isMixedLegacyTab = tab.title.trim().toLowerCase() === "data";
     if (!tabMatches && !isMixedLegacyTab) continue;
 
     const { header, rows } = await getTabContents(spreadsheetId, tab.title);

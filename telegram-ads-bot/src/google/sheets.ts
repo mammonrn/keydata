@@ -27,13 +27,19 @@ const MAX_COLUMN = "AZ";
 // several API round-trips (plus throttles) for nothing. Cleared on save
 // errors so externally deleted files/tabs get re-resolved.
 const spreadsheetIdCache = new Map<string, string>();
-const tabIdCache = new Map<string, number>();
-const headerCache = new Map<string, string[]>();
+const tabCache = new Map<string, EnsuredTab>();
+
+// Google Sheets treats tab titles case-insensitively (it rejects addSheet
+// "TikTok" when "Tiktok" exists), so every lookup here must too — and the
+// cache must be keyed that way as well, or "TikTok" and "Tiktok" would get
+// two entries pointing at the same physical tab.
+function tabCacheKey(spreadsheetId: string, tabName: string): string {
+  return `${spreadsheetId}|${tabName.trim().toLowerCase()}`;
+}
 
 export function clearSheetCaches(): void {
   spreadsheetIdCache.clear();
-  tabIdCache.clear();
-  headerCache.clear();
+  tabCache.clear();
 }
 
 export function buildSheetFileName(website: string, month: string, year: string): string {
@@ -71,9 +77,21 @@ export async function listSheetTabs(spreadsheetId: string): Promise<SheetTab[]> 
     .filter((s) => s.sheetId >= 0 && s.title.length > 0);
 }
 
+/**
+ * Locates a tab by name, comparing case-insensitively because that is how
+ * the Sheets API itself compares titles: asking for "TikTok" when the file
+ * holds a "Tiktok" tab must resolve to that tab, not report "not found" and
+ * send the caller off to addSheet — which the API then rejects as a
+ * duplicate.
+ *
+ * The returned tab carries its *literal* title. Callers must use that for
+ * A1 ranges; a range built from the requested spelling would address a tab
+ * that does not exist.
+ */
 export async function findTab(spreadsheetId: string, tabName: string): Promise<SheetTab | null> {
   const tabs = await listSheetTabs(spreadsheetId);
-  return tabs.find((t) => t.title === tabName) ?? null;
+  const wanted = tabName.trim().toLowerCase();
+  return tabs.find((t) => t.title.trim().toLowerCase() === wanted) ?? null;
 }
 
 async function findSpreadsheet(monthFolderId: string, fileName: string): Promise<string | null> {
@@ -227,22 +245,27 @@ export async function ensureSheetTab(
   platform: string,
   neededFields: Iterable<DataField> = []
 ): Promise<EnsuredTab> {
-  const cacheKey = `${spreadsheetId}|${tabName}`;
-  const cachedSheetId = tabIdCache.get(cacheKey);
-  const cachedHeader = headerCache.get(cacheKey);
+  const cacheKey = tabCacheKey(spreadsheetId, tabName);
+  const cached = tabCache.get(cacheKey);
   // A cached header is only reusable when it already covers every field this
   // write needs; otherwise the tab has to be widened first.
-  if (cachedSheetId !== undefined && cachedHeader) {
-    const covered = [...neededFields].every((f) => columnIndexOfField(cachedHeader, f) >= 0);
-    if (covered) return { sheetId: cachedSheetId, title: tabName, header: cachedHeader };
+  if (cached) {
+    const covered = [...neededFields].every((f) => columnIndexOfField(cached.header, f) >= 0);
+    if (covered) return cached;
   }
 
+  // Case-insensitive, matching the API: an existing "Tiktok" tab is reused
+  // for a canonical "TikTok" platform instead of triggering a duplicate
+  // addSheet. Its literal title is what every subsequent range is built
+  // from — the tab is deliberately NOT renamed to the canonical spelling,
+  // since renaming would break any formula, chart, or external link that
+  // references the old title.
   const existing = await findTab(spreadsheetId, tabName);
   if (existing) {
     const header = await migrateTabHeaderIfNeeded(spreadsheetId, existing.sheetId, existing.title, platform, neededFields);
-    tabIdCache.set(cacheKey, existing.sheetId);
-    headerCache.set(cacheKey, header);
-    return { ...existing, header };
+    const resolved = { ...existing, header };
+    tabCache.set(cacheKey, resolved);
+    return resolved;
   }
 
   const sheets = getSheetsClient();
@@ -254,16 +277,19 @@ export async function ensureSheetTab(
   );
   await throttle();
 
-  const sheetId = res.data.replies?.[0]?.addSheet?.properties?.sheetId;
+  const created = res.data.replies?.[0]?.addSheet?.properties;
+  const sheetId = created?.sheetId;
   if (sheetId === undefined || sheetId === null) {
     throw new Error(`Failed to create tab "${tabName}" in spreadsheet ${spreadsheetId}`);
   }
+  // Use the title the API actually assigned, not the one requested.
+  const title = created?.title ?? tabName;
 
   const header = buildHeader(new Set([...schemaForPlatform(platform), ...neededFields]));
-  await writeHeaderAndFormat(spreadsheetId, sheetId, tabName, header);
-  tabIdCache.set(cacheKey, sheetId);
-  headerCache.set(cacheKey, header);
-  return { sheetId, title: tabName, header };
+  await writeHeaderAndFormat(spreadsheetId, sheetId, title, header);
+  const resolved = { sheetId, title, header };
+  tabCache.set(cacheKey, resolved);
+  return resolved;
 }
 
 async function createSpreadsheet(monthFolderId: string, fileName: string, tabName: string): Promise<string> {
@@ -537,7 +563,9 @@ export async function ensureColumnForField(
   field: DataField
 ): Promise<string[]> {
   const header = await migrateTabHeaderIfNeeded(spreadsheetId, sheetId, tabName, platform, [field]);
-  headerCache.set(`${spreadsheetId}|${tabName}`, header);
+  // tabName here is already the literal title (callers get it from findTab /
+  // ensureSheetTab), so the cache entry stays consistent with that spelling.
+  tabCache.set(tabCacheKey(spreadsheetId, tabName), { sheetId, title: tabName, header });
   return header;
 }
 

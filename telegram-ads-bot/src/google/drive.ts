@@ -8,6 +8,17 @@ export function sanitizeName(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, "").trim();
 }
 
+/**
+ * Locates a child folder by name, case-insensitively.
+ *
+ * Drive's `name = '...'` query is case-sensitive, and — unlike Sheets tabs —
+ * Drive happily allows two folders with names differing only in case. So a
+ * case-sensitive lookup does not fail loudly here; it quietly creates a
+ * second "TikTok" beside an existing "Tiktok" and splits that platform's
+ * photos across both. The exact-match query stays as the one-call fast path;
+ * only when it misses do we list the parent's folders (a small set — years,
+ * months, platforms) and re-check ignoring case.
+ */
 async function findFolder(parentId: string, name: string): Promise<string | null> {
   const drive = getDriveClient();
   const safeName = name.replace(/'/g, "\\'");
@@ -20,7 +31,11 @@ async function findFolder(parentId: string, name: string): Promise<string | null
   );
   await throttle();
   const files = res.data.files ?? [];
-  return files.length > 0 ? files[0].id ?? null : null;
+  if (files.length > 0 && files[0].id) return files[0].id;
+
+  const siblings = await listChildFolders(parentId);
+  const wanted = name.trim().toLowerCase();
+  return siblings.find((f) => f.name.trim().toLowerCase() === wanted)?.id ?? null;
 }
 
 async function createFolder(parentId: string, name: string): Promise<string> {
@@ -68,10 +83,13 @@ async function findOrCreateFolderCached(
   name: string,
   onCreated?: (folderId: string) => void
 ): Promise<string> {
-  const hit = folderIdCache.get(cacheKey);
+  // Lower-cased so two spellings of the same folder ("TikTok"/"Tiktok"),
+  // which findFolder now resolves to one folder, share one cache entry.
+  const key = cacheKey.toLowerCase();
+  const hit = folderIdCache.get(key);
   if (hit) return hit;
   const id = await findOrCreateFolder(parentId, name, onCreated);
-  folderIdCache.set(cacheKey, id);
+  folderIdCache.set(key, id);
   return id;
 }
 
