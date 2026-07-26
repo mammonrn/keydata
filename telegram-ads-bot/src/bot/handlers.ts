@@ -268,13 +268,13 @@ async function startAdsFlow(ctx: Context, userId: number, text: string): Promise
       delete (data as any).platform;
     }
   }
-  // Platform may auto-fill from /setplatform, but website must never be
-  // silently defaulted: groups mix records for several websites, and a
-  // stale session default was mis-filing other sites' data. When absent
-  // from the message, website is asked for explicitly (with shortcut
-  // buttons) like any other required field.
-  if (!data.platform && session.defaultPlatform) data.platform = session.defaultPlatform;
-
+  // Neither website nor platform is ever silently defaulted from the
+  // session: groups mix records for several websites and platforms, and a
+  // stale session default (e.g. from testing Telegram, then sending an
+  // un-labeled Facebook message) was mis-filing data under the wrong
+  // platform/tab. When absent from the message, both are asked for
+  // explicitly (with shortcut buttons, including the /setplatform favorite
+  // as the first button) like any other required field.
   const ids = [...heldPhotoIds(session)];
   if (fileId && !ids.includes(fileId)) ids.push(fileId);
 
@@ -510,7 +510,6 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
           delete (data as any).platform;
         }
       }
-      if (!data.platform && current.defaultPlatform) data.platform = current.defaultPlatform;
       const existingLeftovers = current.leftoverLines ?? [];
       const newLeftovers = parsedFull.leftoverLines ?? [];
       const mergedLeftovers = [...existingLeftovers];

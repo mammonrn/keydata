@@ -181,7 +181,7 @@ export function registerCommands(bot: Bot): void {
       "/edit [row] - แก้ไขข้อมูล (ใช้ default website + เดือนปัจจุบัน)",
       "/list [website] [month] [platform] - แสดงรายการข้อมูล",
       "/setwebsite [name] - ตั้งเว็บโปรด (ปุ่มลัดแรกตอนถูกถาม + เว็บเป้าหมายของ /edit และ /delete — ไม่เติมอัตโนมัติตอนบันทึก)",
-      "/setplatform [name] - ตั้งค่า platform default",
+      "/setplatform [name] - ตั้ง platform โปรด (ปุ่มลัดแรกตอนถูกถาม — ไม่เติมอัตโนมัติตอนบันทึก)",
       "/listalias - แสดง alias ของชื่อเว็บทั้งหมด",
       "/log - แสดง log ล่าสุด 10 รายการ",
     ];
@@ -267,7 +267,9 @@ export function registerCommands(bot: Bot): void {
     const platform = normalizePlatformName(args.join(" "));
     setDefaultPlatform(ctx.from!.id, platform);
     logCommand(ctx.from!.id, username(ctx), `/setplatform ${platform}`);
-    await ctx.reply(`✅ ตั้งค่า platform default เป็น: ${platform}`);
+    await ctx.reply(
+      `✅ ตั้ง platform โปรดเป็น: ${platform}\n\nหมายเหตุ: ระบบจะไม่เติม platform ให้อัตโนมัติอีกต่อไป — platform โปรดจะแสดงเป็นปุ่มแรกตอนถูกถามหา platform และใช้เป็น platform เป้าหมายของ /edit และ /delete`
+    );
   });
 
   bot.command("edit", async (ctx) => {
