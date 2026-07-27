@@ -12,8 +12,8 @@ import {
   schemaForPlatform,
 } from "../config";
 import { getDriveClient, getSheetsClient, throttle, withRetry } from "./auth";
-import { findMonthFolder, sanitizeName } from "./drive";
-import { logSheetCreated } from "../services/logger";
+import { assertNotBornTrashed, findMonthFolder, isLive, sanitizeName } from "./drive";
+import { logError, logSheetCreated } from "../services/logger";
 
 const DATA_START_ROW = 2; // row 1 = header
 
@@ -40,6 +40,14 @@ function tabCacheKey(spreadsheetId: string, tabName: string): string {
 export function clearSheetCaches(): void {
   spreadsheetIdCache.clear();
   tabCache.clear();
+}
+
+/** Drops every cached tab belonging to one spreadsheet (used when it turns
+ * out to be trashed, so its sheetIds must not be reused). */
+function dropTabCacheForSpreadsheet(spreadsheetId: string): void {
+  for (const key of [...tabCache.keys()]) {
+    if (key.startsWith(`${spreadsheetId}|`)) tabCache.delete(key);
+  }
 }
 
 export function buildSheetFileName(website: string, month: string, year: string): string {
@@ -308,13 +316,14 @@ async function createSpreadsheet(monthFolderId: string, fileName: string, tabNam
         mimeType: "application/vnd.google-apps.spreadsheet",
         parents: [monthFolderId],
       },
-      fields: "id",
+      fields: "id, trashed",
     })
   );
   await throttle();
 
   const spreadsheetId = created.data.id;
   if (!spreadsheetId) throw new Error(`Failed to create spreadsheet: ${fileName}`);
+  await assertNotBornTrashed(spreadsheetId, created.data.trashed, `ไฟล์ชีท "${fileName}"`);
 
   // Rename the default first tab to the platform's tab name, addressing it
   // by its real sheetId rather than assuming 0.
@@ -361,6 +370,24 @@ export async function ensureSpreadsheet(
   const fileName = buildSheetFileName(website, month, year);
   const tabName = sanitizeTabName(platform);
   const fileCacheKey = `${monthFolderId}|${fileName}`;
+
+  // The month folder was revalidated by ensureFolderStructure, but the sheet
+  // inside it can be trashed on its own — and rows appended to a trashed
+  // spreadsheet are written successfully and are invisible to the user. A
+  // cached id therefore has to be proven live before it is written to; the
+  // uncached branch below is already safe, since findSpreadsheet filters on
+  // `trashed = false`.
+  const cachedId = spreadsheetIdCache.get(fileCacheKey);
+  if (cachedId !== undefined && !(await isLive(cachedId))) {
+    logError(
+      actor?.userId ?? 0,
+      actor?.username,
+      `Cached spreadsheet "${fileName}" (${cachedId}) is trashed or missing — dropping it and creating a fresh sheet`,
+      website
+    );
+    spreadsheetIdCache.delete(fileCacheKey);
+    dropTabCacheForSpreadsheet(cachedId);
+  }
 
   const existing = spreadsheetIdCache.get(fileCacheKey) ?? (await findSpreadsheet(monthFolderId, fileName));
   if (existing) {
