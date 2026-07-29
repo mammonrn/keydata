@@ -5,6 +5,7 @@ import {
   buildRowValues,
   colLetter,
   columnIndexOfField,
+  forceDateAsText,
   headerToFields,
   planHeaderInsertions,
   remapRow,
@@ -556,13 +557,17 @@ export async function deleteRow(spreadsheetId: string, tabName: string, sheetId:
   );
   await throttle();
 
-  const remainingRows = await getAllRows(spreadsheetId, tabName);
+  // Read the header alongside the rows: renumbering rewrites every remaining
+  // row, and a read strips the apostrophe that pins date cells to text, so
+  // the date column has to be re-forced or this rewrite would hand every
+  // stored date back to the spreadsheet's locale for reinterpretation.
+  const { header, rows: remainingRows } = await getTabContents(spreadsheetId, tabName);
   if (remainingRows.length === 0) return;
 
   const renumbered = remainingRows.map((r, idx) => {
     const values = [...r.values];
     values[0] = String(idx + 1);
-    return values;
+    return forceDateAsText(header, values);
   });
   const width = Math.max(...renumbered.map((r) => r.length), 1);
 

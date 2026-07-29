@@ -58,6 +58,7 @@ export type SessionStep =
   | "idle"
   | "awaiting_field_value"
   | "awaiting_confirmation"
+  | "awaiting_duplicate_confirmation"
   | "awaiting_adsname_pick"
   | "awaiting_location_pick"
   | "editing_row_select"
@@ -91,6 +92,13 @@ export interface UserSession {
   pendingPhotosAt?: number;
   pendingMediaGroupId?: string;
   confirmationMessageId?: number;
+  /**
+   * Set once the user has answered "save it anyway" to a duplicate warning,
+   * so the save that follows doesn't re-detect the same duplicate and ask
+   * again. Cleared whenever the confirmation screen is shown again, since
+   * that means the record may have changed since it was acknowledged.
+   */
+  duplicateAcknowledged?: boolean;
   pendingEdit?: PendingEdit;
   deleteTarget?: { row: number };
   deleteConfirmStage?: number;
@@ -101,6 +109,7 @@ export type LogAction =
   | "DATA_RECORDED"
   | "DATA_EDITED"
   | "DATA_DELETED"
+  | "DATA_DUPLICATE"
   | "PHOTO_UPLOADED"
   | "FOLDER_CREATED"
   | "SHEET_CREATED"
