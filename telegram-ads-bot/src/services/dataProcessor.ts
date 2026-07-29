@@ -49,7 +49,11 @@ export interface PhotoInput {
 }
 
 export function parseThaiDate(raw: string): Date {
-  const trimmed = raw.trim();
+  // Spaces are stripped for the same reason normalizeDateString strips them,
+  // and it matters more here: this is what picks the year/month folder and
+  // spreadsheet a row is filed under, so a date this function fails to read
+  // falls through to today's date and files the row under the wrong month.
+  const trimmed = raw.replace(/\s+/g, "");
 
   const dmy = trimmed.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
   if (dmy) {

@@ -191,24 +191,41 @@ const DATE_DMY = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/;
 const DATE_YMD = /^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})$/;
 
 /**
+ * Strips every space out of a date before it is matched.
+ *
+ * Spaces around a date's separators carry no meaning — "28 .7 . 2026" and
+ * "28. 7 .2026" are the same day as "28.7.2026" — but the patterns below are
+ * anchored, so a single stray space made the whole match fail. trim() only
+ * ever cleaned the two ends, which is why a date typed without spaces
+ * normalized correctly while the same date typed with them fell through and
+ * was stored verbatim, spaces and all. Removing the spaces up front handles
+ * every arrangement of them at once, rather than trying to spell each one out
+ * in the patterns.
+ */
+function compactDate(raw: string): string {
+  return raw.replace(/\s+/g, "");
+}
+
+/**
  * Accepts a date written with /, . or - separators (23/7/2026, 23.7.2026,
- * 23-7-2026, 2026-7-23) and normalizes it to DD/MM/YYYY. Returns null for
- * anything that is not a recognizable date, which doubles as validation for
- * date answers in the Q&A flow.
+ * 23-7-2026, 2026-7-23), with or without spaces around the separators, and
+ * normalizes it to DD/MM/YYYY. Returns null for anything that is not a
+ * recognizable date, which doubles as validation for date answers in the Q&A
+ * flow.
  */
 export function normalizeDateString(raw: string): string | null {
-  const trimmed = raw.trim();
+  const compact = compactDate(raw);
   let day: number;
   let month: number;
   let year: number;
 
-  const dmy = trimmed.match(DATE_DMY);
+  const dmy = compact.match(DATE_DMY);
   if (dmy) {
     day = Number(dmy[1]);
     month = Number(dmy[2]);
     year = Number(dmy[3]);
   } else {
-    const ymd = trimmed.match(DATE_YMD);
+    const ymd = compact.match(DATE_YMD);
     if (!ymd) return null;
     year = Number(ymd[1]);
     month = Number(ymd[2]);
@@ -270,8 +287,12 @@ export function parseAdsMessage(rawText: string): ParseResult {
       if (matchedLineIndices.has(i)) continue;
       const line = lines[i].trim();
       if (!line) continue;
-      const dateMatch = line.match(/(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})/)
-                     ?? line.match(/(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})/);
+      // Spaces around the separators are tolerated here too, so a date picked
+      // out of an unlabeled line behaves the same as one behind a "date :"
+      // label. The four-digit year keeps this from matching arbitrary
+      // number-slash-number text.
+      const dateMatch = line.match(/(\d{1,2})\s*[\/.\-]\s*(\d{1,2})\s*[\/.\-]\s*(\d{4})/)
+                     ?? line.match(/(\d{4})\s*[\/.\-]\s*(\d{1,2})\s*[\/.\-]\s*(\d{1,2})/);
       if (dateMatch) {
         const normalized = normalizeDateString(dateMatch[0]);
         if (normalized) {
