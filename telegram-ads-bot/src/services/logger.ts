@@ -66,6 +66,15 @@ export function logDeleted(userId: number, username: string | undefined, website
   writeLog({ action: "DATA_DELETED", user_id: userId, username, website, details, sheet_id: sheetId, row_number: rowNumber });
 }
 
+/**
+ * Records both halves of the duplicate flow — the detection and what the user
+ * decided about it — under one action, so `grep DATA_DUPLICATE` answers "how
+ * often does this fire, and how often do people save anyway?" in one pass.
+ */
+export function logDuplicate(userId: number, username: string | undefined, website: string, details: string, sheetId?: string, rowNumber?: number): void {
+  writeLog({ action: "DATA_DUPLICATE", user_id: userId, username, website, details, sheet_id: sheetId, row_number: rowNumber });
+}
+
 export function logPhotoUploaded(userId: number, username: string | undefined, website: string, details: string): void {
   writeLog({ action: "PHOTO_UPLOADED", user_id: userId, username, website, details });
 }

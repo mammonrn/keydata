@@ -15,10 +15,17 @@ import {
 import { AdsData, FIELD_LABELS_TH, REQUIRED_FIELDS, TOTAL_MESSAGE_OR_CLICK_FIELD, UserSession } from "../types";
 import { getSession, resetSessionFlow, updateSession } from "../services/memory";
 import { formatParsedSummary, parseAdsMessage, parseFieldAnswer, parseTotalMessageOrClickAnswer } from "./parser";
-import { editableFieldsForPlatform, findEditableField } from "./fields";
-import { deleteRowWithLog, editRowField, moveRowToWebsite, PhotoInput, saveAdsData } from "../services/dataProcessor";
+import { editableFieldsForPlatform, findEditableField, formatRowDisplay } from "./fields";
+import {
+  deleteRowWithLog,
+  editRowField,
+  findDuplicateRecords,
+  moveRowToWebsite,
+  PhotoInput,
+  saveAdsData,
+} from "../services/dataProcessor";
 import { isKnownWebsite, listKnownWebsites } from "../google/drive";
-import { logError, logUnauthorized } from "../services/logger";
+import { logDuplicate, logError, logUnauthorized } from "../services/logger";
 
 // Shortcut buttons offered when asking for the website; used as a fallback
 // when the Drive folder listing is unavailable.
@@ -49,6 +56,12 @@ function missingFieldsOf(data: Partial<AdsData>): string[] {
 
 function confirmationKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("✅ ยืนยัน", "confirm").text("✏️ แก้ไข", "editrequest").row().text("❌ ยกเลิก", "cancel");
+}
+
+// Same two-button shape as the confirmation above, with wording that makes
+// the consequence explicit: this one writes a row the sheet already has.
+function duplicateKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("✅ บันทึกซ้ำจริง", "dupconfirm").text("❌ ยกเลิก", "dupcancel");
 }
 
 function missingFieldLabel(field: string): string {
@@ -144,6 +157,9 @@ async function showConfirmation(ctx: Context, userId: number): Promise<void> {
     step: "awaiting_confirmation",
     defaultWebsite: data.website ?? session.defaultWebsite,
     defaultPlatform: data.platform ?? session.defaultPlatform,
+    // Reaching this screen means the record is (re)open for review, so a
+    // duplicate acknowledged for an earlier version of it no longer applies.
+    duplicateAcknowledged: undefined,
   });
   const summary = formatParsedSummary(data);
   const photoCount = session.pendingPhotoFileIds?.length ?? 0;
@@ -525,7 +541,7 @@ async function rejectIfDifferentRecord(
 
   const label = describeRecord(pending);
   const instruction =
-    session.step === "awaiting_confirmation"
+    session.step === "awaiting_confirmation" || session.step === "awaiting_duplicate_confirmation"
       ? "กรุณากด ✅ ยืนยัน หรือ ❌ ยกเลิก รายการก่อนหน้าก่อน แล้วค่อยส่งข้อมูลใหม่อีกครั้ง"
       : "กรุณากรอกรายการก่อนหน้าให้เสร็จ หรือพิมพ์ /cancel เพื่อยกเลิก แล้วค่อยส่งข้อมูลใหม่อีกครั้ง";
 
@@ -542,7 +558,7 @@ async function rejectIfDifferentRecord(
 async function continueFlow(ctx: Context, session: UserSession, text: string, fileId?: string, mediaGroupId?: string): Promise<void> {
   const userId = session.userId;
 
-  if (fileId && (session.step === "awaiting_confirmation" || session.step === "awaiting_field_value" || session.step === "awaiting_adsname_pick" || session.step === "awaiting_location_pick")) {
+  if (fileId && (session.step === "awaiting_confirmation" || session.step === "awaiting_duplicate_confirmation" || session.step === "awaiting_field_value" || session.step === "awaiting_adsname_pick" || session.step === "awaiting_location_pick")) {
     const count = await accumulatePhoto(userId, fileId, mediaGroupId);
     if (!text.trim()) {
       await ctx.reply(`📷 เพิ่มรูปแล้ว (รวม ${count} รูป)`);
@@ -558,7 +574,7 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
   // and discard every other field it carries, so merge it into pendingData
   // instead. (Single-field answers like "Total Click: 50" parse to 1 field
   // and still flow to the strict per-question handlers below.)
-  if ((session.step === "awaiting_field_value" || session.step === "awaiting_confirmation" || session.step === "awaiting_adsname_pick" || session.step === "awaiting_location_pick") && text.trim()) {
+  if ((session.step === "awaiting_field_value" || session.step === "awaiting_confirmation" || session.step === "awaiting_duplicate_confirmation" || session.step === "awaiting_adsname_pick" || session.step === "awaiting_location_pick") && text.trim()) {
     const parsedFull = parseAdsMessage(text);
     if (Object.keys(parsedFull.data).length >= 2) {
       const current = getSession(userId);
@@ -612,6 +628,9 @@ async function continueFlow(ctx: Context, session: UserSession, text: string, fi
     case "awaiting_confirmation":
       await ctx.reply("กรุณาใช้ปุ่มที่แสดงไว้ (✅ ยืนยัน / ✏️ แก้ไข / ❌ ยกเลิก) หรือพิมพ์ /cancel เพื่อยกเลิก");
       return;
+    case "awaiting_duplicate_confirmation":
+      await ctx.reply("⚠️ ข้อมูลนี้ซ้ำกับที่เคยบันทึกไว้ กรุณาใช้ปุ่มที่แสดงไว้ (✅ บันทึกซ้ำจริง / ❌ ยกเลิก) หรือพิมพ์ /cancel เพื่อยกเลิก");
+      return;
     case "awaiting_adsname_pick":
     case "awaiting_location_pick":
       await ctx.reply("กรุณาใช้ปุ่มที่แสดงไว้เพื่อเลือก หรือพิมพ์ /cancel เพื่อยกเลิก");
@@ -631,6 +650,52 @@ async function downloadTelegramPhoto(ctx: Context, fileId: string, dateLabel: st
   const safeDateLabel = dateLabel.replace(/[^\w-]/g, "-");
   const filename = `${safeDateLabel}_${index}${ext}`;
   return { buffer, filename, mimeType: "image/jpeg" };
+}
+
+/**
+ * Stops a save that would duplicate an existing row and asks the user what to
+ * do about it. Returns true when the flow has been parked on that question.
+ *
+ * A failure to *check* never blocks a save: if Sheets is unreachable or the
+ * tab can't be read, the error is logged and the record is written as before.
+ * Refusing to save because a duplicate check couldn't run would turn a
+ * best-effort safeguard into an outage.
+ */
+async function warnIfDuplicate(ctx: Context, userId: number, data: Partial<AdsData>): Promise<boolean> {
+  let found;
+  try {
+    found = await findDuplicateRecords(data);
+  } catch (err) {
+    logError(userId, ctx.from?.username, `Duplicate check failed (saving anyway): ${String(err)}`, data.website);
+    return false;
+  }
+  if (!found) return false;
+
+  const first = found.matches[0];
+  const rowLabels = found.matches.map((m) => `#${m.rowNumber}`).join(", ");
+  logDuplicate(
+    userId,
+    ctx.from?.username,
+    data.website ?? "",
+    `Duplicate detected: ${found.matches.length} matching row(s) ${rowLabels} in ${found.fileName} [${found.tabName}] for date ${data.date}`,
+    found.spreadsheetId,
+    first.rowNumber
+  );
+
+  updateSession(userId, { step: "awaiting_duplicate_confirmation" });
+
+  const extra =
+    found.matches.length > 1 ? `\n\n(พบทั้งหมด ${found.matches.length} แถวที่ตรงกัน: Row ${rowLabels})` : "";
+  await ctx.reply(
+    `⚠️ พบข้อมูลนี้ซ้ำกับที่เคยบันทึกไว้แล้ว\n` +
+      `วันที่ ${data.date} และข้อมูลที่กรอกมาตรงกันทุกอย่าง\n` +
+      `📄 ไฟล์: ${found.fileName} [${found.tabName}] Row #${first.rowNumber}${extra}\n\n` +
+      `📥 ข้อมูลที่เพิ่งส่งมา:\n${formatParsedSummary(data)}\n\n` +
+      `📋 ข้อมูลเดิม (Row #${first.rowNumber}):\n${formatRowDisplay(found.header, first.values)}\n\n` +
+      `ต้องการบันทึกซ้ำหรือไม่?`,
+    { reply_markup: duplicateKeyboard() }
+  );
+  return true;
 }
 
 async function performConfirm(ctx: Context, userId: number): Promise<void> {
@@ -653,6 +718,12 @@ async function performConfirm(ctx: Context, userId: number): Promise<void> {
     await ctx.reply(NO_DATA_MESSAGE);
     return;
   }
+
+  // Last gate before the write. Deliberately placed after every other check
+  // and after the auto-fill/edit confirmations, so it only ever asks about a
+  // record that is otherwise ready to save — and only once, since answering
+  // "save it anyway" sets duplicateAcknowledged and comes straight back here.
+  if (!session.duplicateAcknowledged && (await warnIfDuplicate(ctx, userId, data))) return;
 
   try {
     const fileIds = session.pendingPhotoFileIds ?? [];
@@ -698,6 +769,37 @@ export function registerHandlers(bot: Bot): void {
 
     if (data === "confirm") {
       await performConfirm(ctx, userId);
+      return;
+    }
+
+    if (data === "dupconfirm") {
+      const session = getSession(userId);
+      if (!session.pendingData) {
+        resetSessionFlow(userId);
+        await ctx.reply("ไม่มีข้อมูลที่รอการยืนยัน");
+        return;
+      }
+      logDuplicate(
+        userId,
+        ctx.from.username,
+        session.pendingData.website ?? "",
+        `User chose to save the duplicate anyway (date ${session.pendingData.date})`
+      );
+      updateSession(userId, { duplicateAcknowledged: true });
+      await performConfirm(ctx, userId);
+      return;
+    }
+
+    if (data === "dupcancel") {
+      const session = getSession(userId);
+      logDuplicate(
+        userId,
+        ctx.from.username,
+        session.pendingData?.website ?? "",
+        `User cancelled the save after a duplicate warning (date ${session.pendingData?.date ?? "-"})`
+      );
+      resetSessionFlow(userId);
+      await ctx.reply("❌ ยกเลิกแล้ว ไม่ได้บันทึกข้อมูลซ้ำ");
       return;
     }
 

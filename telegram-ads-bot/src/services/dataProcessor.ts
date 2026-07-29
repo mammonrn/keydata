@@ -7,6 +7,7 @@ import {
   columnIndexOfSystem,
   config,
   dataFieldsPresent,
+  forceDateAsText,
   headerToFields,
   isCanonicalPlatform,
   isSuperAdmin,
@@ -33,6 +34,7 @@ import {
   sanitizeTabName,
   updateRowValues,
 } from "../google/sheets";
+import { DuplicateMatch, findDuplicateRows } from "./duplicateCheck";
 import { logDeleted, logEdited, logPhotoUploaded, logRecorded, nowBangkok } from "./logger";
 
 export interface Actor {
@@ -174,6 +176,62 @@ export async function saveAdsData(
   }
 }
 
+export interface DuplicateCheckResult {
+  spreadsheetId: string;
+  tabName: string;
+  fileName: string;
+  month: string;
+  year: string;
+  header: string[];
+  matches: DuplicateMatch[];
+}
+
+/**
+ * Looks for rows this record would duplicate, inside the one tab it would be
+ * written to: the website's spreadsheet for the record's *own* month (not the
+ * current one — a report typed on the 1st for the 31st belongs to last
+ * month's file), and that file's tab for this platform.
+ *
+ * Costs a single values.get for that tab on top of the lookups the save
+ * itself performs, and those lookups are cached. Returns null when there is
+ * nothing to compare against — no file, no tab, no header, or no match — so
+ * the very first record of a month never pays for a comparison that cannot
+ * find anything.
+ */
+export async function findDuplicateRecords(
+  data: Partial<AdsData>
+): Promise<DuplicateCheckResult | null> {
+  if (!data.date || !data.website || !data.platform) return null;
+
+  const website = normalizeWebsiteName(data.website);
+  const platform = normalizePlatformName(data.platform);
+  const dateObj = parseThaiDate(data.date);
+  const month = MONTH_NAMES_EN[dateObj.getMonth()];
+  const year = String(dateObj.getFullYear());
+
+  const spreadsheetId = await findSpreadsheetIdForWebsiteMonth(website, month, year, dateObj);
+  if (!spreadsheetId) return null;
+
+  const tab = await findTab(spreadsheetId, sanitizeTabName(platform));
+  if (!tab) return null;
+
+  const { header, rows } = await getTabContents(spreadsheetId, tab.title);
+  if (header.length === 0) return null;
+
+  const matches = findDuplicateRows(header, rows, { ...data, website, platform });
+  if (matches.length === 0) return null;
+
+  return {
+    spreadsheetId,
+    tabName: tab.title,
+    fileName: buildSheetFileName(website, month, year),
+    month,
+    year,
+    header,
+    matches,
+  };
+}
+
 export interface CurrentMonthSheet {
   spreadsheetId: string;
   sheetId: number;
@@ -244,7 +302,10 @@ export async function editRowField(
   const before = beforeRow[columnIndex] ?? "";
   afterRow[columnIndex] = newValue;
 
-  await updateRowValues(spreadsheetId, tabName, rowNumber, afterRow, header.length);
+  // The whole row is rewritten, not just the edited cell, so the date column
+  // is re-pinned to text — editing any field would otherwise let the
+  // spreadsheet's locale reinterpret the date that row already had.
+  await updateRowValues(spreadsheetId, tabName, rowNumber, forceDateAsText(header, afterRow), header.length);
   logEdited(
     actor.userId,
     actor.username,

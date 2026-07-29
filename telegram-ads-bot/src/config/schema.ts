@@ -281,6 +281,48 @@ export function colLetter(n: number): string {
   return out || "A";
 }
 
+/**
+ * Forces a value to be stored as literal text rather than being reinterpreted
+ * by Google Sheets.
+ *
+ * Every write path uses `valueInputOption: "USER_ENTERED"`, which parses each
+ * cell exactly as if it had been typed into the UI — and *that* parse follows
+ * the spreadsheet's own locale. A date written as "01/12/2026" therefore
+ * lands as 12 January on a US-locale file and as 1 December on a Thai one, so
+ * the same record reads differently depending on a setting the bot doesn't
+ * control. A leading apostrophe is the UI's own escape for "keep this as
+ * text": it is not part of the stored value (reads return "01/12/2026"), it
+ * is not visible in the cell, and it makes the displayed date identical to
+ * what the user typed on every spreadsheet.
+ *
+ * The trade-off is deliberate: date cells become text, so Sheets-side date
+ * arithmetic and chronological sorting no longer work on them. Every date
+ * comparison the bot performs happens in code (see duplicateCheck.ts), and
+ * DD/MM/YYYY text is what users read, so correctness of the displayed value
+ * wins over in-sheet sortability. Switching to real date cells would mean
+ * pinning each tab's date column to an explicit dd/mm/yyyy number format via
+ * the Sheets API instead.
+ */
+export function asTextCell(value: string): string {
+  if (!value) return value;
+  return value.startsWith("'") ? value : `'${value}`;
+}
+
+/**
+ * Applies asTextCell() to a row's date column, leaving every other cell
+ * untouched. Used by the write paths that build a row out of values read back
+ * from a sheet (row moves, renumbering after a delete, single-field edits) —
+ * a read strips the apostrophe, so without this the very next write would let
+ * the locale reinterpret a date the bot had already pinned down.
+ */
+export function forceDateAsText(header: string[], values: string[]): string[] {
+  const index = columnIndexOfField(header, "date");
+  if (index < 0) return values;
+  const out = [...values];
+  out[index] = asTextCell(out[index] ?? "");
+  return out;
+}
+
 export interface RowSource {
   platform?: string;
   photoLink?: string;
@@ -300,7 +342,8 @@ export function buildRowValues(header: string[], rowNumber: number, data: RowSou
     const field = fieldForHeader(cell);
     if (!field) return "";
     const value = record[field];
-    return value === undefined || value === null ? "" : String(value);
+    if (value === undefined || value === null) return "";
+    return field === "date" ? asTextCell(String(value)) : String(value);
   });
 }
 
@@ -324,7 +367,8 @@ export function remapRow(srcHeader: string[], srcRow: string[], dstHeader: strin
     if (isSystemHeader(cell)) return cellFor((h) => isSameHeader(h, cell));
     const field = fieldForHeader(cell);
     if (!field) return "";
-    return cellFor((h) => fieldForHeader(h) === field);
+    const value = cellFor((h) => fieldForHeader(h) === field);
+    return field === "date" ? asTextCell(value) : value;
   });
 }
 
